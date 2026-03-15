@@ -64,7 +64,6 @@ class WebRTCAudioSender {
 
     // Get microphone stream
     try {
-      await Helper.setSpeakerphoneOn(true);
       localStream = await navigator.mediaDevices.getUserMedia({
         'audio': {
           'echoCancellation': true,
@@ -171,12 +170,6 @@ class WebRTCAudioSender {
     await peerConnection?.close();
     localStream = null;
     peerConnection = null;
-    try {
-      await Helper.setSpeakerphoneOn(true);
-      print("Audio reset done=====");
-    } catch (e) {
-      print("Audio reset error $e");
-    }
     print("🎤 Child mic stopped");
   }
 }
