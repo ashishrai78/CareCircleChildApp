@@ -1,0 +1,1 @@
+{"flutter":{"platforms":{"android":{"default":{"projectId":"carecircle-app","appId":"1:507892246638:android:5d848c8ed587f19970de7f","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"carecircle-app","configurations":{"android":"1:507892246638:android:5d848c8ed587f19970de7f","ios":"1:507892246638:ios:8447c3e2a01bc94c70de7f"}}}}}}
