@@ -1,0 +1,90 @@
+{
+  "project_info": {
+    "project_number": "507892246638",
+    "project_id": "carecircle-app",
+    "storage_bucket": "carecircle-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:507892246638:android:5d848c8ed587f19970de7f",
+        "android_client_info": {
+          "package_name": "com.example.background"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "507892246638-uevgt2qg347skdnlc6p6eei84j5bvb35.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB0s3LcL7qBjT10py0XnLxVcJfN_WWlGn4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "507892246638-uevgt2qg347skdnlc6p6eei84j5bvb35.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "507892246638-c11ulb8539m7vglpponhvaitmdpc7tej.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.carecircleChild"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:507892246638:android:ec30821dfa5649d770de7f",
+        "android_client_info": {
+          "package_name": "com.example.carecircle_parent1"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "507892246638-3cu3f5lt9abkmld72s8j8fc52rpkepsu.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.carecircle_parent1",
+            "certificate_hash": "5e7fa81c19604e71c520611ace49952d4cdaf4c0"
+          }
+        },
+        {
+          "client_id": "507892246638-uevgt2qg347skdnlc6p6eei84j5bvb35.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB0s3LcL7qBjT10py0XnLxVcJfN_WWlGn4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "507892246638-uevgt2qg347skdnlc6p6eei84j5bvb35.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "507892246638-c11ulb8539m7vglpponhvaitmdpc7tej.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.carecircleChild"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
