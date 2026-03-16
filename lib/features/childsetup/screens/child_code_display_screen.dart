@@ -1,5 +1,6 @@
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import '../../../common/widgets/custom_shape/roundedBorder_container.dart';
 import '../controller/child_code_controller.dart';
@@ -12,6 +13,7 @@ class ChildCodeDisplayScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const MethodChannel _audioChannel = MethodChannel('carecircle/audio');
     final controller = Get.put(ChildCodeController());
 
     return Scaffold(
@@ -129,22 +131,12 @@ class ChildCodeDisplayScreen extends StatelessWidget {
               }, child: Text('Mic Permission')),
 
               SizedBox(height: 15,),
-             /* Row(children: [
-                ElevatedButton(
-                  onPressed: () async {
-                    await micRecorder.startRecording();
-                  },
-                  child: const Text("Start Recording"),
-                ),
-
-
-                ElevatedButton(
-                  onPressed: () async {
-                    await micRecorder.stopRecording();
-                  },
-                  child: const Text("Stop Recording"),
-                )
-              ],)*/
+          ElevatedButton(
+            onPressed: () async {
+              await _audioChannel.invokeMethod("resetAudioRoute");
+            },
+            child: Text("Reset Audio"),
+          )
             ],
           ),
         ),

@@ -15,7 +15,7 @@ class WebRTCAudioSender {
   StreamSubscription? _offerListener;
   StreamSubscription? _candidateListener;
 
-  Future<void> start(String callId,) async {
+  Future<void> start(String callId) async {
     if (_running) {
       print("⚠️ WebRTC already running");
       return;
@@ -53,7 +53,7 @@ class WebRTCAudioSender {
 
     peerConnection = await createPeerConnection(config);
 
-    // Monitor ICE connection state
+    // ✅ UPDATED: Auto-stop on parent disconnect
     peerConnection!.onIceConnectionState = (state) {
       print("🧪 Child ICE state: $state");
     };
@@ -62,17 +62,19 @@ class WebRTCAudioSender {
       print("🧪 Child ICE gathering: $state");
     };
 
-    // Get microphone stream
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
         'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
+          'echoCancellation': false,
+          'noiseSuppression': false,
+          'autoGainControl': false,
+          'sampleRate': {'ideal': 48000},
+          'channelCount': 1,
         },
-        'video': false
+        'video': false,
       });
       print("✅ Child mic stream obtained");
+
     } catch (e) {
       print("❌ Child mic permission error: $e");
       _running = false;
@@ -83,7 +85,6 @@ class WebRTCAudioSender {
       peerConnection!.addTrack(track, localStream!);
     }
 
-    // Send local ICE candidates to Firestore
     peerConnection!.onIceCandidate = (candidate) {
       print("📤 Child sending ICE candidate");
       firestore
@@ -93,14 +94,12 @@ class WebRTCAudioSender {
           .add(candidate.toMap());
     };
 
-    // Check if an offer already exists
     final existing = await firestore.collection("calls").doc(callId).get();
     if (existing.exists && existing.data()?["offer"] != null) {
       print("📩 Child found existing offer, processing...");
       await _handleOffer(existing.data()!["offer"], callId);
     }
 
-    // Listen for new offer
     _offerListener = firestore.collection("calls").doc(callId).snapshots().listen((snapshot) async {
       final data = snapshot.data();
       if (data == null) return;
@@ -110,7 +109,6 @@ class WebRTCAudioSender {
       }
     });
 
-    // Listen for remote ICE candidates (from parent)
     _candidateListener = firestore
         .collection("calls")
         .doc(callId)

@@ -59,7 +59,7 @@
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="location"
+            android:foregroundServiceType="location|microphone"
             android:icon="@mipmap/ic_launcher"
             tools:replace="android:exported" />
 

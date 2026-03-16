@@ -109,35 +109,24 @@ void onStart(ServiceInstance service) async {
         final syncMic = data?["sync_mic"];
 
         if (syncMic == true && !webrtcRunning) {
-
           try {
-
             await webrtc.start(docId);
             webrtcRunning = true;
-
             if (service is AndroidServiceInstance) {
               service.setForegroundNotificationInfo(
                 title: "CareCircle Listening Active",
                 content: "Parent is listening surroundings",
               );
             }
-
-
           } catch (e) {
-
             print("⚠️ Mic start failed: $e");
-
           }
-
         }
-
         else if (syncMic == false && webrtcRunning) {
 
           try {
-
             await webrtc.stop();
             webrtcRunning = false;
-
             if (service is AndroidServiceInstance) {
               service.setForegroundNotificationInfo(
                 title: "Child Monitoring Active",

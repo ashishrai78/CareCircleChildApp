@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -21,31 +20,23 @@ Future<void> main() async {
   // GetStorage initialize
   GetStorage.init();
 
-
   // Firebase initialize
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform,).then((value) {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform).then((value) {
     Get.put(AuthenticationRepository());
-  },);
+  });
 
   startWatchdog();
 
-
   /// WorkManager for revive Service
   Workmanager().initialize(callbackDispatcher);
-  Workmanager().registerPeriodicTask(
-    "watchdog",
-    "watchdogTask",
-    frequency: const Duration(minutes: 15),
-  );
-
+  Workmanager().registerPeriodicTask("watchdog", "watchdogTask", frequency: const Duration(minutes: 15));
 
   /// Foreground Service Initialize
   await initializeService();
 
+  _listenToBackgroundService();
   runApp(MyApp());
-
 }
-
 
 /// Foreground service
 Future<void> initializeService() async {
@@ -57,18 +48,17 @@ Future<void> initializeService() async {
       autoStart: true,
       autoStartOnBoot: true,
       isForegroundMode: true,
-  ), iosConfiguration: IosConfiguration()
+    ),
+    iosConfiguration: IosConfiguration(),
   );
 
   service.startService();
 }
 
-
 /// WorkManager for revive Service
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
-
     final service = FlutterBackgroundService();
     bool running = await service.isRunning();
 
@@ -80,12 +70,8 @@ void callbackDispatcher() {
   });
 }
 
-
-
-
-
+/// watch dog
 const platform = MethodChannel('watchdog_channel');
-
 Future<void> startWatchdog() async {
   try {
     await platform.invokeMethod('startWatchdog');
@@ -94,7 +80,27 @@ Future<void> startWatchdog() async {
   }
 }
 
+// ✅ Naya function — file mein kahin bhi add karo
+void _listenToBackgroundService() {
+  final service = FlutterBackgroundService();
 
+  service.on('disableSCO').listen((_) async {
+    const channel = MethodChannel("audio_control");
+    try {
+      await platform.invokeMethod('disableSCO');
+      print("✅ SCO disabled via bridge");
+    } catch (e) {
+      print("⚠️ disableSCO failed: $e");
+    }
+  });
 
-
-
+  service.on('restoreAudio').listen((_) async {
+    const channel = MethodChannel("audio_control");
+    try {
+      await platform.invokeMethod('restoreAudio');
+      print("✅ Audio restored via bridge");
+    } catch (e) {
+      print("⚠️ restoreAudio failed: $e");
+    }
+  });
+}
