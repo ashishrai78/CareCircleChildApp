@@ -1,76 +1,71 @@
 name: background
-description: "A new Flutter project."
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+description: "CareCircle — Parental Monitoring Child App"
+publish_to: 'none'
 
 version: 1.0.0+1
 
 environment:
   sdk: ^3.10.1
 
-  #--------------- PACKAGES --------------#
 dependencies:
   flutter:
     sdk: flutter
 
-  # Utility Packages
+  # ============ UI Utility ============
   smooth_page_indicator: ^1.2.1
   flutter_native_splash: ^2.4.5
+  connectivity_plus: ^7.2.0
   lottie: ^3.3.1
   iconsax: ^0.0.8
-  # Battery Status
-  battery_plus: ^7.0.0
-  device_info_plus: ^12.3.0
-  geolocator: ^14.0.2
-  permission_handler: ^12.0.1
-  location: ^8.0.1
+
+  # ============ Background Services (still needed as Flutter entry point) ============
   flutter_background_service: ^5.1.0
   flutter_local_notifications: ^20.0.0
   workmanager: ^0.9.0+3
   android_intent_plus: ^6.0.0
 
+  # ============ WebRTC (Mic streaming) ============
   flutter_webrtc: ^1.3.1
+  audio_session: ^0.2.3
 
-  app_usage: ^4.0.1
-  installed_apps: ^2.1.1
-  # Network Packages
-  connectivity_plus: ^6.1.3
-
-
-  # Firebase Packages
+  # ============ Firebase ============
   firebase_core: ^4.4.0
   firebase_auth: ^6.0.1
   cloud_firestore: ^6.1.2
+  firebase_storage: 13.4.3      # ✅ NEW: for app icons
+  firebase_messaging: ^16.0.0    # ✅ NEW: for parent → child push commands
   google_sign_in: ^6.3.0
 
-
-  # State Management
+  # ============ State Management ============
   get: ^4.7.3
   get_storage: ^2.1.1
 
-  # Product Specific
+  # ============ Utility ============
   intl: ^0.20.2
+  permission_handler: ^12.0.1    # Still needed for runtime permission flow
 
+  # ============ REMOVED (replaced by native MethodChannels) ============
+  # ❌ geolocator: replaced by LocationProvider.kt (FusedLocationProviderClient)
+  # ❌ location: replaced by LocationProvider.kt
+  # ❌ battery_plus: replaced by DeviceInfoProvider.kt
+  # ❌ device_info_plus: replaced by DeviceInfoProvider.kt
+  # ❌ app_usage: replaced by UsageStatsProvider.kt (queryEvents — more accurate)
+  # ❌ installed_apps: replaced by AppsProvider.kt (smaller icons, more metadata)
+  # ❌ connectivity_plus: replaced by DeviceInfoProvider.kt
 
-  #--------------- PACKAGES END --------------#
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
-
   flutter_lints: ^5.0.0
-
 
 flutter:
   uses-material-design: true
 
-  #--------------- LOCAL ASSETS --------------#
   assets:
     - assets/logo/
     - assets/animations/
     - assets/images/
 
-
-  #--------------- LOCAL FONTS --------------#
   fonts:
     - family: 'Nunito'
       fonts:
@@ -89,4 +84,3 @@ flutter:
           weight: 600
         - asset: assets/fonts/Nunito-Bold.ttf
           weight: 800
-
