@@ -1,8 +1,14 @@
+<<<<<<< HEAD
 
 import 'package:background/utils/constants/images.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:get/get_core/src/get_main.dart';
+=======
+import 'package:background/utils/constants/images.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+>>>>>>> workspace
 import '../../../../common/icons/icon_widget.dart';
 import '../../../../common/widgets/elevatedButton/elevated_button.dart';
 import '../../../../utils/constants/colors.dart';
@@ -17,8 +23,23 @@ class OnboardingScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+<<<<<<< HEAD
         title: Text("CareCircle", style: Theme.of(context).textTheme.headlineSmall!.apply(color: UColors.white)),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.only(bottomLeft: Radius.circular(8), bottomRight: Radius.circular(8))),
+=======
+        title: Text(
+          "CareCircle",
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall!.apply(color: UColors.white),
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.only(
+            bottomLeft: Radius.circular(8),
+            bottomRight: Radius.circular(8),
+          ),
+        ),
+>>>>>>> workspace
         centerTitle: true,
         backgroundColor: UColors.primary,
         elevation: 0,
@@ -39,11 +60,16 @@ class OnboardingScreen extends StatelessWidget {
             /// Text
             Padding(
               padding: const EdgeInsets.all(5.0),
+<<<<<<< HEAD
               child: Text('Or', style: Theme.of(context).textTheme.bodySmall,),
+=======
+              child: Text('Or', style: Theme.of(context).textTheme.bodySmall),
+>>>>>>> workspace
             ),
 
             //ElevatedButton
             UElevatedButton(
+<<<<<<< HEAD
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -58,12 +84,29 @@ class OnboardingScreen extends StatelessWidget {
               ),
 
             SizedBox(height: 10,),
+=======
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.mail_outline_outlined, size: 20),
+                  SizedBox(width: 10),
+                  Text('Sign Up'),
+                ],
+              ),
+              onPressed: () {
+                Get.to(SignupScreen());
+              },
+            ),
+
+            SizedBox(height: 10),
+>>>>>>> workspace
 
             /// Have a Already an Account
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text('Already have a CareCircle account?'),
+<<<<<<< HEAD
                 SizedBox(width: 4,),
                 GestureDetector(
                   onTap: ()=> Get.to(LoginScreen()),
@@ -74,11 +117,30 @@ class OnboardingScreen extends StatelessWidget {
 
             SizedBox(height: 10,)
 
+=======
+                SizedBox(width: 4),
+                GestureDetector(
+                  onTap: () => Get.to(LoginScreen()),
+                  child: Text(
+                    'Sign In',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall!.copyWith(color: UColors.primary),
+                  ),
+                ),
+              ],
+            ),
+
+            SizedBox(height: 10),
+>>>>>>> workspace
           ],
         ),
       ),
     );
   }
 }
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> workspace

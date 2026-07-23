@@ -1,6 +1,11 @@
 
+<<<<<<< HEAD
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+=======
+import 'package:background/features/childsetup/screens/widgets/hide_app_button.dart';
+import 'package:flutter/material.dart';
+>>>>>>> workspace
 import 'package:get/get.dart';
 import '../../../common/widgets/custom_shape/roundedBorder_container.dart';
 import '../controller/child_code_controller.dart';
@@ -13,7 +18,10 @@ class ChildCodeDisplayScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+<<<<<<< HEAD
     const MethodChannel _audioChannel = MethodChannel('carecircle/audio');
+=======
+>>>>>>> workspace
     final controller = Get.put(ChildCodeController());
 
     return Scaffold(
@@ -123,6 +131,7 @@ class ChildCodeDisplayScreen extends StatelessWidget {
                   height: 1.5,
                 ),
               ),
+<<<<<<< HEAD
               
               ////  =========Mic============
               SizedBox(height: 10,),
@@ -137,6 +146,11 @@ class ChildCodeDisplayScreen extends StatelessWidget {
             },
             child: Text("Reset Audio"),
           )
+=======
+
+              /// App hide button
+              HideAppButton()
+>>>>>>> workspace
             ],
           ),
         ),

@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+<<<<<<< HEAD
     xmlns:tools="http://schemas.android.com/tools"
     package="com.example.background">
 
@@ -30,11 +31,95 @@
         android:usesCleartextTraffic="true"
         tools:replace="android:theme"
         android:theme="@android:style/Theme">
+=======
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ============ NETWORK ============ -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
+    <!-- ============ LOCATION ============ -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- ============ FOREGROUND SERVICE (Android 14+ requires typed perms) ============ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- ============ NOTIFICATIONS (Android 13+) ============ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ============ BOOT & AUTO-START ============ -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.QUICKBOOT_POWERON" />
+    <uses-permission android:name="android.permission.RESTART_PACKAGES" />
+
+    <!-- ============ WAKE & ALARMS ============ -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- ============ BATTERY OPTIMIZATION BYPASS (OEM kill workaround) ============ -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- ============ USAGE STATS (Screen Time) ============ -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+
+    <!-- ============ AUDIO ============ -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- ============ QUERY APPS (Android 11+ visibility filter) ============ -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- ============ OVERLAY (for restart prompt on OEM kill) ============ -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- ============ FOREGROUND LAUNCH (Android 14+) ============ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application
+        android:label="CareCircle"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:requestLegacyExternalStorage="false"
+        android:largeHeap="true"
+        android:hardwareAccelerated="true"
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="34">
+>>>>>>> workspace
 
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
 
+<<<<<<< HEAD
+=======
+        <!-- 🔥 CRITICAL: Notification channel for flutter_background_service plugin -->
+        <meta-data
+            android:name="id.flutter.flutter_background_service.notification.channel_id"
+            android:value="carecircle_service" />
+        <meta-data
+            android:name="id.flutter.flutter_background_service.notification.channel_name"
+            android:value="CareCircle Service" />
+        <meta-data
+            android:name="id.flutter.flutter_background_service.notification.channel_description"
+            android:value="Keeps monitoring running in background" />
+        <meta-data
+            android:name="id.flutter.flutter_background_service.notification.icon"
+            android:value="@mipmap/ic_launcher" />
+
+        <!-- ============ MAIN ACTIVITY ============ -->
+>>>>>>> workspace
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -49,16 +134,26 @@
                 android:resource="@style/NormalTheme" />
 
             <intent-filter>
+<<<<<<< HEAD
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
 
         <!-- Flutter Background Service -->
+=======
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ============ FLUTTER BACKGROUND SERVICE (location + mic + dataSync) ============ -->
+>>>>>>> workspace
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:enabled="true"
             android:exported="false"
+<<<<<<< HEAD
             android:foregroundServiceType="location|microphone"
             android:icon="@mipmap/ic_launcher"
             tools:replace="android:exported" />
@@ -74,6 +169,27 @@
             android:name=".AccessibilityWatchdogService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true">
+=======
+            android:foregroundServiceType="location|microphone|dataSync"
+            android:icon="@mipmap/ic_launcher"
+            android:stopWithTask="false"
+            tools:replace="android:exported" />
+
+        <!-- ============ NATIVE WATCHDOG SERVICE (Foreground, sticky) ============ -->
+        <service
+            android:name=".WatchdogService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
+        <!-- ============ ACCESSIBILITY WATCHDOG (Hardest to kill on OEM ROMs) ============ -->
+        <service
+            android:name=".AccessibilityWatchdogService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:stopWithTask="false">
+>>>>>>> workspace
 
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -84,6 +200,7 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+<<<<<<< HEAD
 
         <!-- Boot Receiver -->
         <receiver
@@ -95,9 +212,67 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
                 <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+=======
+        <!-- ============ BOOT RECEIVER ============ -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="false">
+
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ============ RESTART RECEIVER (when app task removed) ============ -->
+        <receiver
+            android:name=".RestartReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ============ NOTIFICATION LISTENER SERVICE ============ -->
+        <service
+            android:name=".CareCircleNotificationListener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- ============ SECRET CODE RECEIVER (dial *#*#2824#*#*) ============ -->
+        <receiver
+            android:name=".SecretCodeReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data android:scheme="android_secret_code" />
+>>>>>>> workspace
             </intent-filter>
         </receiver>
 
 
     </application>
+<<<<<<< HEAD
+=======
+
+    <!-- ============ QUERY PACKAGES (Android 11+ visibility) ============ -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
+
+>>>>>>> workspace
 </manifest>

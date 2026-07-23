@@ -4,12 +4,17 @@ plugins {
     id("com.google.gms.google-services")
     // END: FlutterFire Configuration
     id("kotlin-android")
+<<<<<<< HEAD
+=======
+    id("kotlin-kapt")
+>>>>>>> workspace
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
     namespace = "com.example.background"
+<<<<<<< HEAD
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -18,10 +23,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_1_8  // बदला हुआ: 17 से 1_8
 
         // Core Library Desugaring enable करने के लिए
+=======
+    compileSdk = 36   // ✅ Android 16 (required by connectivity_plus, flutter_webrtc, google_sign_in_android, path_provider_android)
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+
+>>>>>>> workspace
         isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
+<<<<<<< HEAD
         jvmTarget = JavaVersion.VERSION_1_8.toString()  // बदला हुआ: 17 से 1_8
     }
 
@@ -37,10 +52,29 @@ android {
 
         // MultiDex enable करें
         multiDexEnabled = true
+=======
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    defaultConfig {
+        applicationId = "com.example.background"
+        minSdk = 24          // ✅ Android 7.0+ (covers 99% market)
+        targetSdk = 36       // ✅ Android 16 (matches compileSdk — Play Store compliant)
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+
+        multiDexEnabled = true
+
+        // ✅ Native code architecture filters (smaller APK)
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+        }
+>>>>>>> workspace
     }
 
     buildTypes {
         release {
+<<<<<<< HEAD
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
@@ -51,6 +85,32 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+=======
+            // TODO: Replace with your own release keystore before production launch
+            signingConfig = signingConfigs.getByName("debug")
+
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/DEPENDENCIES"
+            excludes += "META-INF/INDEX.LIST"
+        }
+    }
+
+    // ✅ WebRTC has conflicting duplicates
+    configurations {
+        all {
+            exclude(group = "com.google.android.gms", module = "play-services-places")
+>>>>>>> workspace
         }
     }
 }
@@ -60,9 +120,51 @@ flutter {
 }
 
 dependencies {
+<<<<<<< HEAD
     // Core Library Desugaring dependency
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     // MultiDex dependency
     implementation("androidx.multidex:multidex:2.0.1")
 }
+=======
+
+    // ============ Core Library Desugaring (java.time on old Android) ============
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // ============ MultiDex ============
+    implementation("androidx.multidex:multidex:2.0.1")
+
+    // ============ Kotlin Coroutines (for async native calls) ============
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // ============ AndroidX Lifecycle (for service lifecycle) ============
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-service:2.8.7")
+
+    // ============ WorkManager 2.9+ (background tasks) ============
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // ============ Google Play Services - Location (FusedLocationProviderClient) ============
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // ============ Firebase (auto-provided by FlutterFire plugins — DO NOT add manually) ============
+    // NOTE: firebase_core, firebase_auth, cloud_firestore, firebase_storage, firebase_messaging
+    // Flutter plugins automatically add their native Android dependencies.
+    // Adding them here causes "Could not find com.google.firebase:firebase-firestore-ktx:" errors.
+
+    // ============ JSON serialization ============
+    implementation("com.google.code.gson:gson:2.11.0")
+
+    // ============ AndroidX Core (for NotificationCompat, etc.) ============
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+
+    // ============ Firebase (native — for WatchdogService direct Firestore access) ============
+    implementation("com.google.firebase:firebase-firestore:25.1.1")
+    implementation("com.google.firebase:firebase-auth:23.1.0")
+    implementation("com.google.firebase:firebase-common:21.0.0")
+
+
+}
+>>>>>>> workspace

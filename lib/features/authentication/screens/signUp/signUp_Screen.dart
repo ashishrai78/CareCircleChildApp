@@ -1,7 +1,12 @@
+<<<<<<< HEAD
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:get/get_core/src/get_main.dart';
+=======
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+>>>>>>> workspace
 
 import '../../../../common/dividers/divider_widget.dart';
 import '../../../../common/icons/icon_widget.dart';
@@ -29,7 +34,10 @@ class SignupScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+<<<<<<< HEAD
 
+=======
+>>>>>>> workspace
                 //-----[SignUp Title Text]-----
                 Text(
                   UTexts.signupTitle,
@@ -37,6 +45,7 @@ class SignupScreen extends StatelessWidget {
                 ),
 
                 //------[TextFormFields]----
+<<<<<<< HEAD
                 SizedBox(
                   height: USizes.spaceBtwSections,
                 ),
@@ -84,10 +93,56 @@ class SignupScreen extends StatelessWidget {
                   height: USizes.spaceBtwInputFields,
                 ),
 
+=======
+                SizedBox(height: USizes.spaceBtwSections),
+
+                //-----[TextField for UserName]----
+                UTextFormField(
+                  controller: controller.firstName,
+                  validator: (value) =>
+                      UValidator.validateEmptyText('Name', value),
+                  prefixIcon: Icons.person,
+                  labelText: 'Name',
+                ),
+
+                //-----[Other textFields]-----
+                SizedBox(height: USizes.spaceBtwInputFields),
+
+                UTextFormField(
+                  controller: controller.email,
+                  validator: (value) => UValidator.validateEmail(value),
+                  prefixIcon: Icons.mail_outline,
+                  labelText: 'Email',
+                ),
+
+                SizedBox(height: USizes.spaceBtwInputFields),
+
+                Obx(
+                  () => UTextFormField(
+                    obscureText: controller.isPasswordVisible.value,
+                    controller: controller.password,
+                    validator: (value) => UValidator.validatePassword(value),
+                    prefixIcon: Icons.password,
+                    suffixIcon: IconButton(
+                      onPressed: () => controller.isPasswordVisible.value =
+                          !controller.isPasswordVisible.value,
+                      icon: Icon(
+                        controller.isPasswordVisible.value
+                            ? Icons.visibility_off
+                            : Icons.visibility,
+                      ),
+                    ),
+                    labelText: 'Password',
+                  ),
+                ),
+
+                SizedBox(height: USizes.spaceBtwInputFields),
+>>>>>>> workspace
 
                 //-----[CheckBox or Texts]-----
                 Row(
                   children: [
+<<<<<<< HEAD
                     Obx(() => Checkbox(value: controller.privacyPolicy.value, onChanged: (value) => controller.privacyPolicy.value = !controller.privacyPolicy.value)),
                     RichText(
                         text: TextSpan(
@@ -134,6 +189,61 @@ class SignupScreen extends StatelessWidget {
                 ///-----[IconBtn Google, FaceBook]----
                 SizedBox(height: USizes.spaceBtwSections/2,),
                 UIconWidget()
+=======
+                    Obx(
+                      () => Checkbox(
+                        value: controller.privacyPolicy.value,
+                        onChanged: (value) => controller.privacyPolicy.value =
+                            !controller.privacyPolicy.value,
+                      ),
+                    ),
+                    RichText(
+                      text: TextSpan(
+                        style: Theme.of(context).textTheme.bodyMedium,
+                        children: [
+                          TextSpan(text: '${UTexts.iAgreeTo} '),
+                          TextSpan(
+                            text: '${UTexts.privacyPolicy} ',
+                            style: Theme.of(context).textTheme.bodyMedium!
+                                .copyWith(
+                                  color: UColors.primary,
+                                  decoration: TextDecoration.underline,
+                                  decorationColor: UColors.primary,
+                                ),
+                          ),
+                          TextSpan(text: '${UTexts.and} '),
+                          TextSpan(
+                            text: '${UTexts.termsOfUse} ',
+                            style: Theme.of(context).textTheme.bodyMedium!
+                                .copyWith(
+                                  color: UColors.primary,
+                                  decoration: TextDecoration.underline,
+                                  decorationColor: UColors.primary,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+
+                //-----[Create Account Button]----
+                SizedBox(height: USizes.spaceBtwSections),
+                UElevatedButton(
+                  onPressed: () {
+                    controller.registerUser();
+                  },
+                  child: Text(UTexts.createAccount),
+                ),
+
+                //----[Divider]-----
+                SizedBox(height: USizes.spaceBtwSections / 2),
+                UItemDividerWidget(),
+
+                ///-----[IconBtn Google, FaceBook]----
+                SizedBox(height: USizes.spaceBtwSections / 2),
+                UIconWidget(),
+>>>>>>> workspace
               ],
             ),
           ),
