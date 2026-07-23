@@ -31,22 +31,23 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
-    <!-- ============ BATTERY OPTIMIZATION BYPASS (OEM kill workaround) ============ -->
+    <!-- ============ BATTERY OPTIMIZATION BYPASS ============ -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- ============ USAGE STATS (Screen Time) ============ -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+    <!-- ============ USAGE STATS ============ -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- ============ AUDIO ============ -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- ============ QUERY APPS (Android 11+ visibility filter) ============ -->
+    <!-- ============ QUERY APPS ============ -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- ============ OVERLAY (for restart prompt on OEM kill) ============ -->
+    <!-- ============ OVERLAY ============ -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- ============ FOREGROUND LAUNCH (Android 14+) ============ -->
@@ -68,7 +69,7 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- 🔥 CRITICAL: Notification channel for flutter_background_service plugin -->
+        <!-- 🔥 Notification channel for flutter_background_service plugin -->
         <meta-data
             android:name="id.flutter.flutter_background_service.notification.channel_id"
             android:value="carecircle_service" />
@@ -102,7 +103,7 @@
             </intent-filter>
         </activity>
 
-        <!-- ============ FLUTTER BACKGROUND SERVICE (location + mic + dataSync) ============ -->
+        <!-- ============ FLUTTER BACKGROUND SERVICE ============ -->
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:enabled="true"
@@ -110,17 +111,21 @@
             android:foregroundServiceType="location|microphone|dataSync"
             android:icon="@mipmap/ic_launcher"
             android:stopWithTask="false"
-            tools:replace="android:exported" />
+            tools:replace="android:exported, android:foregroundServiceType" />
 
-        <!-- ============ NATIVE WATCHDOG SERVICE (Foreground, sticky) ============ -->
+        <!-- ============ NATIVE WATCHDOG SERVICE (specialUse — no 6-hr limit) ============ -->
         <service
             android:name=".WatchdogService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:stopWithTask="false" />
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous parental control monitoring and child safety tracking — requires persistent location, accessibility watchdog, and real-time sync with parent app" />
+        </service>
 
-        <!-- ============ ACCESSIBILITY WATCHDOG (Hardest to kill on OEM ROMs) ============ -->
+        <!-- ============ ACCESSIBILITY WATCHDOG ============ -->
         <service
             android:name=".AccessibilityWatchdogService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -148,11 +153,11 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <!-- ❌ REMOVED: LOCKED_BOOT_COMPLETED (requires directBootAware=true) -->
             </intent-filter>
         </receiver>
 
-        <!-- ============ RESTART RECEIVER (when app task removed) ============ -->
+        <!-- ============ RESTART RECEIVER ============ -->
         <receiver
             android:name=".RestartReceiver"
             android:enabled="true"
@@ -160,6 +165,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.USER_PRESENT" />
                 <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+                <action android:name="com.example.background.RESTART_WATCHDOG" />
             </intent-filter>
         </receiver>
 
@@ -173,7 +179,7 @@
             </intent-filter>
         </service>
 
-        <!-- ============ SECRET CODE RECEIVER (dial *#*#2824#*#*) ============ -->
+        <!-- ============ SECRET CODE RECEIVER ============ -->
         <receiver
             android:name=".SecretCodeReceiver"
             android:enabled="true"
@@ -184,10 +190,9 @@
             </intent-filter>
         </receiver>
 
-
     </application>
 
-    <!-- ============ QUERY PACKAGES (Android 11+ visibility) ============ -->
+    <!-- ============ QUERY PACKAGES ============ -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
