@@ -27,6 +27,7 @@ class PermissionSetupScreen extends StatefulWidget {
 class _PermissionSetupScreenState extends State<PermissionSetupScreen> {
   static const _watchdogChannel = MethodChannel('watchdog_channel');
   static const _usageChannel = MethodChannel('usage_channel');
+  static const _permissionChannel = MethodChannel('permissions_channel');
 
   int _currentStep = 0;
   bool _isLoading = false;
@@ -121,9 +122,15 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen> {
         case 2: // Microphone
           await Permission.microphone.request();
           break;
-        case 3: // Notifications
+        case 3: // Notifications + Notification Access
           if (await Permission.notification.isDenied) {
             await Permission.notification.request();
+          }
+          final bool isEnabled = await _permissionChannel.invokeMethod<bool>('isNotificationAccessEnabled',) ?? false;
+
+          if (!isEnabled) {await _permissionChannel.invokeMethod('openNotificationAccessSettings',);
+
+            await Future.delayed(const Duration(seconds: 1));
           }
           break;
         case 4: // Usage Stats

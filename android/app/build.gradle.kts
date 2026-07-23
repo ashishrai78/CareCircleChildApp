@@ -75,6 +75,7 @@ flutter {
 }
 
 dependencies {
+
     // ============ Core Library Desugaring (java.time on old Android) ============
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
@@ -110,4 +111,6 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore:25.1.1")
     implementation("com.google.firebase:firebase-auth:23.1.0")
     implementation("com.google.firebase:firebase-common:21.0.0")
+
+
 }

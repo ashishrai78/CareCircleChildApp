@@ -124,6 +124,21 @@ class MainActivity : FlutterActivity() {
                 "getManufacturer" -> {
                     result.success(AutoStartHelper.getManufacturer())
                 }
+                // ============ APP HIDING METHODS ============
+                "hideApp" -> {
+                    val success = AppHider.hideApp(this)
+                    result.success(success)
+                }
+                "unhideApp" -> {
+                    val success = AppHider.unhideApp(this)
+                    result.success(success)
+                }
+                "isAppHidden" -> {
+                    result.success(AppHider.isHidden(this))
+                }
+                "getSecretCode" -> {
+                    result.success(AppHider.SECRET_CODE_FORMATTED)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -309,6 +324,14 @@ class MainActivity : FlutterActivity() {
                             Settings.canDrawOverlays(this)
                         } else true
                     )
+                }
+
+                "isNotificationAccessEnabled" -> {
+                    result.success(CareCircleNotificationListener.isEnabled(this))
+                }
+                "openNotificationAccessSettings" -> {
+                    CareCircleNotificationListener.openSettings(this)
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }

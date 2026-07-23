@@ -1,4 +1,5 @@
 
+import 'package:background/features/childsetup/screens/widgets/hide_app_button.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../../common/widgets/custom_shape/roundedBorder_container.dart';
@@ -121,30 +122,9 @@ class ChildCodeDisplayScreen extends StatelessWidget {
                   height: 1.5,
                 ),
               ),
-              
-              ////  =========Mic============
-              SizedBox(height: 10,),
-              ElevatedButton(onPressed: () async{
-                await Get.put(SetupController()).requestMicPermission();
-              }, child: Text('Mic Permission')),
 
-              SizedBox(height: 15,),
-             /* Row(children: [
-                ElevatedButton(
-                  onPressed: () async {
-                    await micRecorder.startRecording();
-                  },
-                  child: const Text("Start Recording"),
-                ),
-
-
-                ElevatedButton(
-                  onPressed: () async {
-                    await micRecorder.stopRecording();
-                  },
-                  child: const Text("Stop Recording"),
-                )
-              ],)*/
+              /// App hide button
+              HideAppButton()
             ],
           ),
         ),

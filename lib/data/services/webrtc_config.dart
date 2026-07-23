@@ -5,50 +5,53 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 /// Centralized ICE server config + signaling constants.
 /// Used by BOTH child (sender) and parent (receiver) apps.
 ///
-/// ⚠️ CRITICAL FOR PRODUCTION:
-///  - Google STUN servers are reliable & free
-///  - OpenRelay TURN servers are public, rate-limited — works for testing
-///  - For production scale, MUST deploy your own Coturn server
-///  - See: https://github.com/coturn/coturn
-///
-/// ICE Candidate Policy:
-///  - 'all' = accept any (most compatible, slightly slower)
-///  - 'relay' = TURN only (privacy, requires working TURN)
-///  - 'host' = direct P2P only (fastest, fails behind symmetric NAT)
+/// ✅ Production Setup:
+///  - Google STUN (free, reliable for direct P2P)
+///  - Metered TURN (paid, reliable for NAT traversal)
+///  - Multi-protocol support (UDP + TCP + TLS)
 class WebRTCConfig {
   WebRTCConfig._();
 
-  /// ICE servers — STUN (free) + TURN (fallback)
+  /// ICE servers — STUN + TURN
+  /// Order matters: STUN first (try direct P2P), TURN fallback (relay)
   static const List<Map<String, dynamic>> iceServers = [
-    // ✅ Google STUN — 99.9% uptime
+    // ✅ Google STUN — free, 99.9% uptime (for direct P2P discovery)
     {'urls': 'stun:stun.l.google.com:19302'},
     {'urls': 'stun:stun1.l.google.com:19302'},
     {'urls': 'stun:stun2.l.google.com:19302'},
     {'urls': 'stun:stun3.l.google.com:19302'},
 
-    // ⚠️ OpenRelay TURN — public, rate-limited (test only)
-    // For production: replace with your own Coturn server
+    // ✅ Metered STUN — backup
+    {'urls': 'stun:stun.relay.metered.ca:80'},
+
+    // 🔥 Metered TURN — production-grade, reliable NAT traversal
+    // Supports UDP, TCP, and TLS for max compatibility
     {
-      'urls': 'turn:openrelay.metered.ca:80',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:80',
+      'username': 'bbcf61e1a367341798789c64',
+      'credential': 'q+gj8mtw2NK43RPY',
     },
     {
-      'urls': 'turn:openrelay.metered.ca:443',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:80?transport=tcp',
+      'username': 'bbcf61e1a367341798789c64',
+      'credential': 'q+gj8mtw2NK43RPY',
     },
     {
-      'urls': 'turns:openrelay.metered.ca:443',
-      'username': 'openrelayproject',
-      'credential': 'openrelayproject',
+      'urls': 'turn:global.relay.metered.ca:443',
+      'username': 'bbcf61e1a367341798789c64',
+      'credential': 'q+gj8mtw2NK43RPY',
+    },
+    {
+      'urls': 'turns:global.relay.metered.ca:443?transport=tcp',
+      'username': 'bbcf61e1a367341798789c64',
+      'credential': 'q+gj8mtw2NK43RPY',
     },
   ];
 
   /// WebRTC peer connection configuration
   static final Map<String, dynamic> configuration = {
     'iceServers': iceServers,
-    'iceTransportPolicy': 'all',
+    'iceTransportPolicy': 'all',  // 'all' = STUN + TURN (recommended)
     'iceCandidatePoolSize': 10,
     'bundlePolicy': 'max-bundle',
     'rtcpMuxPolicy': 'require',
@@ -144,11 +147,11 @@ extension WebRTCConnectionStateX on WebRTCConnectionState {
 
   bool get isActive =>
       this == WebRTCConnectionState.connected ||
-      this == WebRTCConnectionState.connecting;
+          this == WebRTCConnectionState.connecting;
 
   bool get isTransient =>
       this == WebRTCConnectionState.initializing ||
-      this == WebRTCConnectionState.creatingOffer ||
-      this == WebRTCConnectionState.waitingForAnswer ||
-      this == WebRTCConnectionState.connecting;
+          this == WebRTCConnectionState.creatingOffer ||
+          this == WebRTCConnectionState.waitingForAnswer ||
+          this == WebRTCConnectionState.connecting;
 }

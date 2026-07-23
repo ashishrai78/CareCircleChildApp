@@ -10,6 +10,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import android.content.pm.ApplicationInfo
 
 /**
  * 📊 PRODUCTION UsageStatsProvider — uses UsageStatsManager.queryEvents()
@@ -290,5 +291,97 @@ class UsageStatsProvider(private val context: Context) {
             "startMs" to startMs,
             "endMs" to endMs
         )
+    }
+
+    /**
+     * 🎯 Get current foreground/active app
+     * Returns map with packageName, appName, lastUsed timestamp
+     *
+     * Uses queryEvents() with last 10 seconds window to find latest ACTIVITY_RESUMED event.
+     * Falls back to 60 seconds window if nothing found.
+     *
+     * Requires USAGE_STATS permission.
+     */
+    fun getCurrentActiveApp(): Map<String, Any?> {
+        if (!hasPermission()) {
+            return mapOf("error" to "Usage stats permission not granted")
+        }
+
+        return try {
+            val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+
+            val now = System.currentTimeMillis()
+            val startTime = now - 10_000  // Last 10 seconds
+
+            val events = usageStatsManager.queryEvents(startTime, now)
+            val event = UsageEvents.Event()
+
+            var latestPackage: String? = null
+            var latestTimestamp = 0L
+
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    if (event.timeStamp > latestTimestamp) {
+                        latestTimestamp = event.timeStamp
+                        latestPackage = event.packageName
+                    }
+                }
+            }
+
+            // Fallback: try last 60 seconds
+            if (latestPackage == null) {
+                val events60 = usageStatsManager.queryEvents(now - 60_000, now)
+                val event60 = UsageEvents.Event()
+                while (events60.hasNextEvent()) {
+                    events60.getNextEvent(event60)
+                    if (event60.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                        if (event60.timeStamp > latestTimestamp) {
+                            latestTimestamp = event60.timeStamp
+                            latestPackage = event60.packageName
+                        }
+                    }
+                }
+            }
+
+            if (latestPackage == null) {
+                return mapOf(
+                    "packageName" to null,
+                    "appName" to "Idle",
+                    "isSystemApp" to false,
+                    "timestamp" to 0L,
+                    "secondsAgo" to 0L
+                )
+            }
+
+            // Get friendly app name
+            val appName = try {
+                val pm = context.packageManager
+                val appInfo = pm.getApplicationInfo(latestPackage, 0)
+                pm.getApplicationLabel(appInfo).toString()
+            } catch (e: Exception) {
+                latestPackage
+            }
+
+            // Check if it's a system app
+            val isSystemApp = try {
+                val pm = context.packageManager
+                val appInfo = pm.getApplicationInfo(latestPackage, 0)
+                (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            } catch (e: Exception) {
+                false
+            }
+
+            mapOf(
+                "packageName" to latestPackage,
+                "appName" to appName,
+                "isSystemApp" to isSystemApp,
+                "timestamp" to latestTimestamp,
+                "secondsAgo" to ((now - latestTimestamp) / 1000)
+            )
+        } catch (e: Exception) {
+            Log.e("UsageStatsProvider", "getCurrentActiveApp error: ${e.message}")
+            mapOf("error" to e.message)
+        }
     }
 }

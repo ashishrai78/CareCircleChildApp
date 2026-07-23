@@ -10,3 +10,8 @@
 
 # Keep our providers
 -keep class com.example.background.** { *; }
+
+# Flutter Play Core (deferred components) — ignore missing classes
+-dontwarn com.google.android.play.core.**
+-dontwarn io.flutter.embedding.android.FlutterPlayStoreSplitApplication
+-dontwarn io.flutter.embedding.engine.deferredcomponents.PlayStoreDeferredComponentManager
