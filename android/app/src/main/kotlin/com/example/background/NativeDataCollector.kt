@@ -13,6 +13,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /**
  * 📦 NATIVE Data Collector — called by WatchdogService every 60s
@@ -44,6 +46,12 @@ class NativeDataCollector(private val context: Context) {
         private const val KEY_LAST_HISTORY_LNG = "last_history_lng"
         private const val KEY_LAST_HISTORY_TIME = "last_history_time"
     }
+
+    // 🔥 Cached UID to avoid repeated FirebaseAuth calls
+    @Volatile
+    private var cachedUid: String? = null
+    // 🔥 Cached location for emergencies
+    private val PREFS_NAME = "carecircle_prefs"
 
     private val locationProvider = LocationProvider(context)
     private val deviceInfoProvider = DeviceInfoProvider(context)
@@ -357,34 +365,54 @@ class NativeDataCollector(private val context: Context) {
 
     private suspend fun collectLocationSync(): Map<String, Any?>? {
         return withTimeoutOrNull(10_000) {
-            withContext(Dispatchers.IO) {
-                var result: Map<String, Any?>? = null
-                val latch = java.util.concurrent.CountDownLatch(1)
+            suspendCancellableCoroutine { cont ->
                 locationProvider.getCurrentLocation(
                     highAccuracy = true,
                     timeoutMs = 8000
-                ) { data, _ ->
-                    result = data
-                    latch.countDown()
+                ) { data, error ->
+                    if (cont.isActive) {
+                        if (data != null) {
+                            cont.resume(data)
+                        } else {
+                            Log.w(TAG, "Location collection failed: $error")
+                            cont.resume(null)
+                        }
+                    }
                 }
-                latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
-                result
             }
         }
     }
 
     private fun getUserId(): String? {
-        // Try Firebase Auth first (shared between Flutter & native)
+        // 🔥 Return cached UID if available
+        cachedUid?.let { return it }
+
+        // Try Firebase Auth (shared between Flutter & native)
         try {
             val authUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
-            if (authUser != null) return authUser.uid
+            if (authUser != null) {
+                cachedUid = authUser.uid
+                return authUser.uid
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Firebase Auth not available: ${e.message}")
         }
 
-        // Fallback: read from native SharedPreferences (set by MainActivity.setUserId)
+        // Fallback: read from native SharedPreferences
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString("currentUserId", null)
+        prefs.getString("currentUserId", null)?.let {
+            cachedUid = it
+            return it
+        }
+
+        return null
+    }
+
+    /**
+     * Invalidate cached UID (call on logout)
+     */
+    fun invalidateUid() {
+        cachedUid = null
     }
 }
 

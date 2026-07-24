@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">CareCircle</string>
-    <string name="accessibility_service_description">CareCircle protection service — keeps monitoring active</string>
+    <string name="accessibility_service_description">CareCircle protects your child by monitoring device activity and ensuring continuous safety tracking.</string>
+    <string name="accessibility_service_summary">Required to keep monitoring active and prevent the app from being killed by battery optimization</string>
 </resources>
