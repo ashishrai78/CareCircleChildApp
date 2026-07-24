@@ -8,7 +8,6 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
-import kotlinx.coroutines.cancel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -16,6 +15,7 @@ import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -428,17 +428,11 @@ class MainActivity : FlutterActivity() {
      * 🔥 Register receiver for ACCESSIBILITY_REVOKED broadcast from native services
      */
     private fun registerAccessibilityRevokedReceiver() {
-        android.content.ContextCompat.registerReceiver(
-            this,
-            object : android.content.BroadcastReceiver() {
-                override fun onReceive(context: Context?, intent: Intent?) {
-                    Log.w(TAG, "⚠️ Accessibility revoked broadcast received")
-                    accessibilitySink?.success("ACCESSIBILITY_REVOKED")
-                }
-            },
-            android.content.IntentFilter("com.example.background.ACCESSIBILITY_REVOKED"),
-            android.content.ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        AccessibilityRevokedReceiver.sinkCallback = { event ->
+            Log.d(TAG, "📡 Forwarding to Flutter: $event")
+            accessibilitySink?.success(event)
+        }
+        Log.d(TAG, "✅ Accessibility revoked receiver callback registered")
     }
 
     // ============ Helpers ============
@@ -505,6 +499,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        AccessibilityRevokedReceiver.sinkCallback = null  // 🔥 Clear callback
         super.onDestroy()
         ioScope.cancel()  // 🔥 Cancel all coroutines
     }

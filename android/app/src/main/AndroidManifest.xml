@@ -190,6 +190,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- ============ ACCESSIBILITY REVOKED RECEIVER ============ -->
+        <receiver
+            android:name=".AccessibilityRevokedReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.background.ACCESSIBILITY_REVOKED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
     <!-- ============ QUERY PACKAGES ============ -->

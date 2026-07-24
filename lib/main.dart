@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -8,57 +10,62 @@ import 'package:get_storage/get_storage.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'data/repositories/authentication/authentication_repository.dart';
-import 'data/services/foreground_service.dart';
+import 'data/services/foreground_service.dart';  // 🔥 onStart + onIosBackground import
 import 'firebase_options.dart';
 import 'my_app.dart';
 
-/// 🛡️ PRODUCTION main.dart
+/// 🛡️ PRODUCTION main.dart (v2 — fixed)
 ///
-/// Critical changes:
-///  1. Notification channel created BEFORE service start (fixes Bad notification)
-///  2. Correct init ORDER (await everything before runApp)
-///  3. Crash-safe — each init wrapped in try/catch
-///  4. Native channels for permissions & watchdog
+/// Fixes vs v1:
+///  1. UID passed to native BEFORE watchdog start (was after)
+///  2. debugPrint instead of print (was blocking in release)
+///  3. Auth state listener — restarts watchdog on login
+///  4. Listens to accessibility revoked events from native
+///  5. Crash-safe — each init wrapped in try/catch
 const String kNotificationChannelId = 'carecircle_service';
 const int kNotificationId = 8888;
 
 final FlutterLocalNotificationsPlugin _notificationsPlugin =
-    FlutterLocalNotificationsPlugin();
+FlutterLocalNotificationsPlugin();
+
+// Global accessibility event stream (listened by MyApp)
+StreamController<String>? _accessibilityEventController;
+Stream<String> get accessibilityEvents =>
+    _accessibilityEventController?.stream ?? const Stream.empty();
 
 Future<void> main() async {
   // 1. Binding
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
+  // Initialize accessibility event stream
+  _accessibilityEventController = StreamController<String>.broadcast();
+
   try {
-    // 2. Storage
     await GetStorage.init();
-    print("✅ GetStorage initialized");
+    debugPrint("✅ GetStorage initialized");
   } catch (e) {
-    print("🔥 GetStorage init failed: $e");
+    debugPrint("🔥 GetStorage init failed: $e");
   }
 
   try {
-    // 3. Firebase
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
     Get.put(AuthenticationRepository());
-    print("✅ Firebase initialized");
+    debugPrint("✅ Firebase initialized");
   } catch (e) {
-    print("🔥 Firebase init failed: $e");
+    debugPrint("🔥 Firebase init failed: $e");
   }
 
   try {
-    // 4. 🔥 CRITICAL: Create notification channel BEFORE any foreground service
     await _createNotificationChannel();
-    print("✅ Notification channel created");
+    debugPrint("✅ Notification channel created");
   } catch (e) {
-    print("🔥 Notification channel creation failed: $e");
+    debugPrint("🔥 Notification channel creation failed: $e");
   }
 
   try {
-    // 5. Workmanager
     await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
     await Workmanager().registerPeriodicTask(
       "watchdog",
@@ -73,35 +80,88 @@ Future<void> main() async {
       ),
       existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
     );
-    print("✅ Workmanager initialized");
+    debugPrint("✅ Workmanager initialized");
   } catch (e) {
-    print("🔥 Workmanager init failed: $e");
+    debugPrint("🔥 Workmanager init failed: $e");
   }
 
   try {
-    // 6. Flutter Background Service
     await initializeService();
-    print("✅ Foreground service initialized");
+    debugPrint("✅ Foreground service initialized");
   } catch (e) {
-    print("🔥 Foreground service init failed: $e");
+    debugPrint("🔥 Foreground service init failed: $e");
   }
 
-  // 7. Native watchdog — DELAYED by 2 sec to let Flutter service fully initialize
-  // This prevents "Bad notification" crash when both services start simultaneously
+  // 🔥 Setup accessibility event listener (native → Flutter)
+  _setupAccessibilityEventListener();
+
+  // 🔥 Setup auth state listener — restarts watchdog on login
+  _setupAuthStateListener();
+
+  // 7. Native watchdog — pass UID FIRST, then start
   Future.delayed(const Duration(seconds: 2), () async {
     await _startNativeWatchdog();
-    print("✅ Native watchdog started (delayed)");
+    debugPrint("✅ Native watchdog started (delayed)");
   });
 
   // 8. RUN
   runApp(MyApp());
 }
 
-/// 🔥 CRITICAL FIX: Create notification channel BEFORE starting foreground service
-///
-/// On Android 8.0+ (API 26+), foreground services REQUIRE a notification channel
-/// to exist before startForeground() is called. Otherwise throws:
-///   "Bad notification for startForeground"
+/// 🔥 Listen to accessibility revoked events from native
+void _setupAccessibilityEventListener() {
+  try {
+    const EventChannel('accessibility_events')
+        .receiveBroadcastStream()
+        .listen(
+          (event) {
+        debugPrint("⚠️ Accessibility event from native: $event");
+        _accessibilityEventController?.add(event.toString());
+      },
+      onError: (e) {
+        debugPrint("🔥 Accessibility event stream error: $e");
+      },
+    );
+  } catch (e) {
+    debugPrint("🔥 Failed to setup accessibility listener: $e");
+  }
+}
+
+/// 🔥 Auth state listener — restarts watchdog with new UID on login
+void _setupAuthStateListener() {
+  try {
+    // Listen to GetStorage changes (AuthenticationRepository writes UID here)
+    // We use a periodic check since GetStorage has no built-in change stream
+    Timer.periodic(const Duration(seconds: 5), (timer) async {
+      try {
+        final currentUid = GetStorage().read<String>('currentUserId');
+        final lastNotifiedUid =
+        GetStorage().read<String>('lastNotifiedUidToNative');
+
+        if (currentUid != null && currentUid != lastNotifiedUid) {
+          debugPrint("🔄 UID changed — notifying native: $currentUid");
+          try {
+            const platform = MethodChannel('watchdog_channel');
+            await platform.invokeMethod('setUserId', {'uid': currentUid});
+            await GetStorage().write('lastNotifiedUidToNative', currentUid);
+
+            // Restart watchdog to pick up new UID
+            await platform.invokeMethod('startWatchdog');
+            debugPrint("✅ Watchdog restarted with new UID");
+          } catch (e) {
+            debugPrint("🔥 Native UID notify failed: $e");
+          }
+        }
+      } catch (e) {
+        // Silent fail — don't crash timer
+      }
+    });
+  } catch (e) {
+    debugPrint("🔥 Auth state listener setup failed: $e");
+  }
+}
+
+/// Create notification channel BEFORE starting foreground service
 Future<void> _createNotificationChannel() async {
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     kNotificationChannelId,
@@ -113,24 +173,24 @@ Future<void> _createNotificationChannel() async {
 
   await _notificationsPlugin
       .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>()
+      AndroidFlutterLocalNotificationsPlugin>()
       ?.createNotificationChannel(channel);
 
-  // Initialize plugin with empty default icon
   const AndroidInitializationSettings androidSettings =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
+  AndroidInitializationSettings('@mipmap/ic_launcher');
   const InitializationSettings settings =
-      InitializationSettings(android: androidSettings);
+  InitializationSettings(android: androidSettings);
   await _notificationsPlugin.initialize(settings: settings);
 }
 
 /// Foreground Service setup
+/// 🔥 onStart and onIosBackground imported from foreground_service.dart
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(
-      onStart: onStart,
+      onStart: onStart,  // 🔥 From foreground_service.dart
       autoStart: true,
       autoStartOnBoot: true,
       isForegroundMode: true,
@@ -141,8 +201,8 @@ Future<void> initializeService() async {
     ),
     iosConfiguration: IosConfiguration(
       autoStart: true,
-      onForeground: onStart,
-      onBackground: onIosBackground,
+      onForeground: onStart,  // 🔥 From foreground_service.dart
+      onBackground: onIosBackground,  // 🔥 From foreground_service.dart
     ),
   );
 
@@ -154,40 +214,49 @@ Future<void> initializeService() async {
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     try {
-      print("🔄 Workmanager task: $task");
+      debugPrint("🔄 Workmanager task: $task");
 
       final service = FlutterBackgroundService();
       final running = await service.isRunning();
+
       if (!running) {
         await service.startService();
-        print("✅ Flutter service restarted by Workmanager");
+        debugPrint("✅ Flutter service restarted by Workmanager");
+
+        // Wait for service to actually come up
+        await Future.delayed(const Duration(seconds: 3));
       }
 
+      // Native watchdog bhi restart karo
       try {
         const platform = MethodChannel('watchdog_channel');
         await platform.invokeMethod('startWatchdog');
       } catch (_) {}
     } catch (e) {
-      print("🔥 Workmanager task failed: $e");
+      debugPrint("🔥 Workmanager task failed: $e");
     }
-
     return true;
   });
 }
 
-/// Start native watchdog service
+/// 🔥 FIX: Pass UID FIRST, then start watchdog
 Future<void> _startNativeWatchdog() async {
   try {
     const platform = MethodChannel('watchdog_channel');
-    await platform.invokeMethod('startWatchdog');
 
-    // 🔥 Pass current user ID to native (if logged in)
+    // 🔥 Pass UID FIRST
     final uid = GetStorage().read<String>('currentUserId');
     if (uid != null) {
       await platform.invokeMethod('setUserId', {'uid': uid});
-      print("✅ UID passed to native: $uid");
+      debugPrint("✅ UID set before watchdog start: $uid");
+      await GetStorage().write('lastNotifiedUidToNative', uid);
+    } else {
+      debugPrint("⚠️ No UID in storage — watchdog will start without user context");
     }
+
+    // Now start watchdog
+    await platform.invokeMethod('startWatchdog');
   } catch (e) {
-    print("⚠️ Native watchdog start failed: $e");
+    debugPrint("⚠️ Native watchdog start failed: $e");
   }
 }
