@@ -5,15 +5,19 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
 
 /**
- * 🛡️ PRODUCTION BootReceiver
+ * 🛡️ PRODUCTION BootReceiver (v2)
  *
- * Critical fixes vs original:
- *  1. Uses startForegroundService() — Android 12+ blocks plain startService from background
- *  2. Starts both WatchdogService AND Flutter BackgroundService
- *  3. Catches ForegroundServiceStartNotAllowedException (Android 12+)
- *  4. Schedules fallback WorkManager task (in case direct start fails)
+ * Fixes vs v1:
+ *  1. Removed LOCKED_BOOT_COMPLETED (was crashing — app not directBootAware)
+ *  2. Uses WorkManager fallback for Android 12+ FGS start restrictions
+ *  3. goAsync() for long-running operations (10 sec window)
+ *  4. Proper ForegroundServiceStartNotAllowedException handling
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -21,6 +25,7 @@ class BootReceiver : BroadcastReceiver() {
         private const val TAG = "BOOT_RECEIVER"
         private const val FLUTTER_SERVICE_CLASS =
             "id.flutter.flutter_background_service.BackgroundService"
+        private const val FALLBACK_WORK_NAME = "watchdog_fallback_boot"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -28,17 +33,28 @@ class BootReceiver : BroadcastReceiver() {
 
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
-            "android.intent.action.QUICKBOOT_POWERON",       // ✅ String literal — not a constant in Intent
-            "com.htc.intent.action.QUICKBOOT_POWERON",       // ✅ HTC custom action
-            Intent.ACTION_MY_PACKAGE_REPLACED,
-            Intent.ACTION_LOCKED_BOOT_COMPLETED -> {
-                startAllServices(context)
+            "android.intent.action.QUICKBOOT_POWERON",
+            "com.htc.intent.action.QUICKBOOT_POWERON",
+            Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                // 🔥 goAsync() — gives 10 sec window (default onReceive is 10ms)
+                val pendingResult = goAsync()
+
+                Thread {
+                    try {
+                        startAllServices(context)
+                        scheduleFallbackWork(context)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Boot init failed: ${e.message}")
+                    } finally {
+                        pendingResult.finish()
+                    }
+                }.start()
             }
         }
     }
 
     private fun startAllServices(context: Context) {
-        // 1. Start native WatchdogService (Foreground)
+        // 1. Start native WatchdogService
         try {
             WatchdogService.start(context)
             Log.d(TAG, "✅ WatchdogService started")
@@ -46,7 +62,7 @@ class BootReceiver : BroadcastReceiver() {
             Log.e(TAG, "❌ WatchdogService start failed: ${e.message}")
         }
 
-        // 2. Start Flutter BackgroundService
+        // 2. Start Flutter BackgroundService (with Android 12+ exception handling)
         try {
             val flutterIntent = Intent().apply {
                 setClassName(context, FLUTTER_SERVICE_CLASS)
@@ -57,12 +73,14 @@ class BootReceiver : BroadcastReceiver() {
                     context.startForegroundService(flutterIntent)
                     Log.d(TAG, "✅ Flutter service started (foreground)")
                 } catch (e: Exception) {
-                    // Android 12+ may throw ForegroundServiceStartNotAllowedException
-                    Log.w(TAG, "⚠️ Foreground start failed, trying regular: ${e.message}")
+                    // Android 12+ ForegroundServiceStartNotAllowedException
+                    Log.w(TAG, "⚠️ Foreground start failed: ${e.message}")
                     try {
                         context.startService(flutterIntent)
+                        Log.d(TAG, "✅ Flutter service started (regular)")
                     } catch (e2: Exception) {
                         Log.e(TAG, "❌ All Flutter service start attempts failed: ${e2.message}")
+                        // Fallback to WorkManager — handled by scheduleFallbackWork
                     }
                 }
             } else {
@@ -72,18 +90,26 @@ class BootReceiver : BroadcastReceiver() {
         } catch (e: Exception) {
             Log.e(TAG, "❌ Flutter service start failed: ${e.message}")
         }
-
-        // 3. Schedule WorkManager fallback (15 min check)
-        scheduleFallbackWork(context)
     }
 
+    /**
+     * 🔥 NEW: Real WorkManager fallback (was empty log in v1)
+     * Periodic check every 15 min — revives services if killed
+     */
     private fun scheduleFallbackWork(context: Context) {
         try {
-            // Use native WorkManager — but Flutter's workmanager plugin may conflict
-            // For now, rely on WatchdogService's own restart loop
-            Log.d(TAG, "✅ Fallback scheduling deferred to WatchdogService loop")
+            val request = PeriodicWorkRequestBuilder<WatchdogRestartWorker>(
+                15, TimeUnit.MINUTES
+            ).build()
+
+            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                FALLBACK_WORK_NAME,
+                ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+            Log.d(TAG, "✅ WorkManager fallback scheduled (15 min periodic)")
         } catch (e: Exception) {
-            Log.e(TAG, "Fallback schedule failed: ${e.message}")
+            Log.e(TAG, "❌ WorkManager schedule failed: ${e.message}")
         }
     }
 }

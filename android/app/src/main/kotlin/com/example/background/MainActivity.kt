@@ -8,21 +8,37 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import kotlinx.coroutines.cancel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * 🛡️ PRODUCTION MainActivity
+ * 🛡️ PRODUCTION MainActivity (v2)
+ *
+ * Fixes vs v1:
+ *  1. Fixed inverted `isBatteryOptimized()` semantics
+ *  2. Heavy operations (getInstalledApps, getAppUsage) on IO dispatcher
+ *  3. try/catch on all Intent launches (OEM-specific ActivityNotFoundException)
+ *  4. onResume() re-verifies watchdog alive
+ *  5. EventChannel for accessibility revoked notifications
  *
  * Method Channels registered:
- *  1. watchdog_channel    — start/stop watchdog, check service status
- *  2. location_channel    — get fused location + accuracy + speed + altitude
- *  3. usage_channel       — get screen time via UsageStatsManager.queryEvents
- *  4. apps_channel        — get installed apps + icons (base64)
- *  5. device_channel      — get device info, battery, network, RAM, storage
- *  6. permissions_channel — request battery optimization, usage stats, overlay
- *  7. mic_channel         — start/stop native audio recording (WebRTC fallback)
+ *  1. watchdog_channel    — start/stop watchdog, OEM helpers, app hider
+ *  2. location_channel    — fused location
+ *  3. usage_channel       — screen time
+ *  4. apps_channel        — installed apps + icons
+ *  5. device_channel      — device info, battery, network, RAM, storage
+ *  6. permissions_channel — runtime permission flow
+ *
+ * Event Channels:
+ *  1. accessibility_events — broadcasts ACCESSIBILITY_REVOKED to Flutter
  */
 class MainActivity : FlutterActivity() {
 
@@ -35,12 +51,19 @@ class MainActivity : FlutterActivity() {
     private lateinit var appsChannel: MethodChannel
     private lateinit var deviceChannel: MethodChannel
     private lateinit var permissionsChannel: MethodChannel
+    private lateinit var accessibilityEventChannel: EventChannel
+
+    // IO scope for heavy operations
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Providers (lazy init)
     private val locationProvider by lazy { LocationProvider(this) }
     private val usageStatsProvider by lazy { UsageStatsProvider(this) }
     private val appsProvider by lazy { AppsProvider(this) }
     private val deviceInfoProvider by lazy { DeviceInfoProvider(this) }
+
+    // Accessibility event sink (Flutter → native)
+    private var accessibilitySink: EventChannel.EventSink? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -51,6 +74,10 @@ class MainActivity : FlutterActivity() {
         setupAppsChannel(flutterEngine)
         setupDeviceChannel(flutterEngine)
         setupPermissionsChannel(flutterEngine)
+        setupAccessibilityEventChannel(flutterEngine)
+
+        // 🔥 Register receiver for accessibility revoked broadcast
+        registerAccessibilityRevokedReceiver()
     }
 
     // ============ WATCHDOG CHANNEL ============
@@ -71,10 +98,8 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "setUserId" -> {
-                    // 🔥 CRITICAL: Flutter passes UID after login — native needs this for Firestore
                     val uid = call.argument<String>("uid")
                     FirestoreClient.setUserId(uid)
-                    // Persist in SharedPreferences for service restarts
                     getSharedPreferences("carecircle_prefs", Context.MODE_PRIVATE)
                         .edit()
                         .putString("currentUserId", uid)
@@ -86,14 +111,16 @@ class MainActivity : FlutterActivity() {
                     result.success(AccessibilityWatchdogService.isEnabled(this))
                 }
                 "openAccessibilitySettings" -> {
-                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(intent)
-                    result.success(true)
+                    val success = tryStartActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
                 }
                 "isBatteryOptimized" -> {
-                    result.success(isBatteryOptimized())
+                    // 🔥 FIX: Return TRUE if device is OPTIMIZING (i.e., killing) the app
+                    result.success(!isIgnoringBatteryOptimizations())
                 }
                 "requestIgnoreBatteryOptimization" -> {
                     requestIgnoreBatteryOptimization()
@@ -101,16 +128,13 @@ class MainActivity : FlutterActivity() {
                 }
                 // ============ OEM AUTOSTART METHODS ============
                 "openAutoStartSettings" -> {
-                    val success = AutoStartHelper.openAutoStartSettings(this)
-                    result.success(success)
+                    result.success(AutoStartHelper.openAutoStartSettings(this))
                 }
                 "openBatteryOptimizationSettings" -> {
-                    val success = AutoStartHelper.openBatteryOptimizationSettings(this)
-                    result.success(success)
+                    result.success(AutoStartHelper.openBatteryOptimizationSettings(this))
                 }
                 "requestIgnoreBatteryOptimizationDirect" -> {
-                    val success = AutoStartHelper.requestIgnoreBatteryOptimization(this)
-                    result.success(success)
+                    result.success(AutoStartHelper.requestIgnoreBatteryOptimization(this))
                 }
                 "needsAutoStartPermission" -> {
                     result.success(AutoStartHelper.needsAutoStartPermission())
@@ -126,12 +150,10 @@ class MainActivity : FlutterActivity() {
                 }
                 // ============ APP HIDING METHODS ============
                 "hideApp" -> {
-                    val success = AppHider.hideApp(this)
-                    result.success(success)
+                    result.success(AppHider.hideApp(this))
                 }
                 "unhideApp" -> {
-                    val success = AppHider.unhideApp(this)
-                    result.success(success)
+                    result.success(AppHider.unhideApp(this))
                 }
                 "isAppHidden" -> {
                     result.success(AppHider.isHidden(this))
@@ -204,23 +226,35 @@ class MainActivity : FlutterActivity() {
                     result.success(usageStatsProvider.hasPermission())
                 }
                 "openUsageStatsSettings" -> {
-                    startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    })
-                    result.success(true)
+                    val success = tryStartActivity(
+                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
                 }
                 "getAppUsage" -> {
                     val startMs = call.argument<Long>("startMs") ?: 0L
                     val endMs = call.argument<Long>("endMs") ?: System.currentTimeMillis()
-                    result.success(usageStatsProvider.getAppUsage(startMs, endMs))
+                    // 🔥 Heavy op — IO dispatcher
+                    ioScope.launch {
+                        val data = usageStatsProvider.getAppUsage(startMs, endMs)
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getTodayUsage" -> {
-                    result.success(usageStatsProvider.getTodayUsage())
+                    ioScope.launch {
+                        val data = usageStatsProvider.getTodayUsage()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getScreenEvents" -> {
                     val startMs = call.argument<Long>("startMs") ?: 0L
                     val endMs = call.argument<Long>("endMs") ?: System.currentTimeMillis()
-                    result.success(usageStatsProvider.getScreenEvents(startMs, endMs))
+                    ioScope.launch {
+                        val data = usageStatsProvider.getScreenEvents(startMs, endMs)
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -239,14 +273,27 @@ class MainActivity : FlutterActivity() {
                 "getInstalledApps" -> {
                     val withIcons = call.argument<Boolean>("withIcons") ?: false
                     val excludeSystem = call.argument<Boolean>("excludeSystem") ?: true
-                    result.success(appsProvider.getInstalledApps(withIcons, excludeSystem))
+                    // 🔥 CRITICAL: Apps enumeration + base64 icons on IO thread
+                    ioScope.launch {
+                        try {
+                            val apps = appsProvider.getInstalledApps(withIcons, excludeSystem)
+                            withContext(Dispatchers.Main) { result.success(apps) }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                result.error("APPS_ERROR", e.message, null)
+                            }
+                        }
+                    }
                 }
                 "getAppIcon" -> {
                     val pkg = call.argument<String>("packageName")
                     if (pkg.isNullOrEmpty()) {
                         result.error("INVALID", "packageName required", null)
                     } else {
-                        result.success(appsProvider.getAppIconBase64(pkg))
+                        ioScope.launch {
+                            val icon = appsProvider.getAppIconBase64(pkg)
+                            withContext(Dispatchers.Main) { result.success(icon) }
+                        }
                     }
                 }
                 else -> result.notImplemented()
@@ -264,22 +311,40 @@ class MainActivity : FlutterActivity() {
         deviceChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "getDeviceInfo" -> {
-                    result.success(deviceInfoProvider.getDeviceInfo())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getDeviceInfo()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getBatteryInfo" -> {
-                    result.success(deviceInfoProvider.getBatteryInfo())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getBatteryInfo()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getNetworkInfo" -> {
-                    result.success(deviceInfoProvider.getNetworkInfo())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getNetworkInfo()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getStorageInfo" -> {
-                    result.success(deviceInfoProvider.getStorageInfo())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getStorageInfo()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getMemoryInfo" -> {
-                    result.success(deviceInfoProvider.getMemoryInfo())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getMemoryInfo()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 "getAll" -> {
-                    result.success(deviceInfoProvider.getAll())
+                    ioScope.launch {
+                        val data = deviceInfoProvider.getAll()
+                        withContext(Dispatchers.Main) { result.success(data) }
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -299,24 +364,26 @@ class MainActivity : FlutterActivity() {
                     result.success(deviceInfoProvider.checkAllPermissions())
                 }
                 "openAppSettings" -> {
-                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                        data = Uri.fromParts("package", packageName, null)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(intent)
-                    result.success(true)
+                    val success = tryStartActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", packageName, null)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
                 }
                 "openOverlaySettings" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:$packageName")
-                        ).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        startActivity(intent)
+                        val success = tryStartActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                        )
+                        result.success(success)
+                    } else {
+                        result.success(true)
                     }
-                    result.success(true)
                 }
                 "hasOverlayPermission" -> {
                     result.success(
@@ -325,7 +392,6 @@ class MainActivity : FlutterActivity() {
                         } else true
                     )
                 }
-
                 "isNotificationAccessEnabled" -> {
                     result.success(CareCircleNotificationListener.isEnabled(this))
                 }
@@ -338,10 +404,67 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ============ Battery Optimization Helpers ============
-    private fun isBatteryOptimized(): Boolean {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+    // ============ ACCESSIBILITY EVENT CHANNEL ============
+    private fun setupAccessibilityEventChannel(flutterEngine: FlutterEngine) {
+        accessibilityEventChannel = EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "accessibility_events"
+        )
+
+        accessibilityEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
+                accessibilitySink = sink
+                Log.d(TAG, "🎧 Flutter listening to accessibility events")
+            }
+
+            override fun onCancel(arguments: Any?) {
+                accessibilitySink = null
+                Log.d(TAG, "🎧 Flutter stopped listening")
+            }
+        })
+    }
+
+    /**
+     * 🔥 Register receiver for ACCESSIBILITY_REVOKED broadcast from native services
+     */
+    private fun registerAccessibilityRevokedReceiver() {
+        android.content.ContextCompat.registerReceiver(
+            this,
+            object : android.content.BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    Log.w(TAG, "⚠️ Accessibility revoked broadcast received")
+                    accessibilitySink?.success("ACCESSIBILITY_REVOKED")
+                }
+            },
+            android.content.IntentFilter("com.example.background.ACCESSIBILITY_REVOKED"),
+            android.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    // ============ Helpers ============
+
+    /**
+     * Safe Intent launch — catches ActivityNotFoundException (OEM-specific paths)
+     */
+    private fun tryStartActivity(intent: Intent): Boolean {
+        return try {
+            startActivity(intent)
+            true
+        } catch (e: android.content.ActivityNotFoundException) {
+            Log.e(TAG, "Activity not found: ${intent.action} — ${e.message}")
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Intent launch failed: ${intent.action} — ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 🔥 FIX: Correct semantics — returns TRUE if app is exempt from battery optimization
+     */
+    private fun isIgnoringBatteryOptimizations(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             pm.isIgnoringBatteryOptimizations(packageName)
         } else true
     }
@@ -367,7 +490,26 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Auto-start watchdog on app launch
         WatchdogService.start(this)
     }
+
+    /**
+     * 🔥 NEW: Re-verify watchdog alive on every app resume
+     */
+    override fun onResume() {
+        super.onResume()
+        if (!WatchdogService.isRunning(this)) {
+            Log.d(TAG, "🔄 WatchdogService not running — restarting on resume")
+            WatchdogService.start(this)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ioScope.cancel()  // 🔥 Cancel all coroutines
+    }
+
+//    private fun CoroutineScope.cancel() {
+//        kotlinx.coroutines.cancel(this)
+//    }
 }
