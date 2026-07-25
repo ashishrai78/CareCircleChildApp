@@ -11,39 +11,27 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * 🔥 NATIVE Firestore Client (v2 — production stable)
- *
- * Critical fixes vs v1:
- *  1. All methods are `suspend` (no Tasks.await blocking)
- *  2. 15s timeout on every operation (no infinite blocks)
- *  3. Retry with exponential backoff (3 attempts)
- *  4. Offline persistence enabled (50MB cache)
- *  5. FirebaseDatabase concurrent writes supported
- *
- * Why native (not Flutter):
- *  - Flutter background service runs in separate isolate
- *  - MethodChannels registered in MainActivity are NOT available there
- *  - Native Firestore works ALWAYS — even when Flutter engine is dead
+ * 🔥 NATIVE Firestore Client (v3 — Realme-optimized)
  */
 object FirestoreClient {
 
     private const val TAG = "FirestoreClient"
-    private const val TIMEOUT_MS = 15_000L
-    private const val MAX_RETRIES = 3
+    private const val TIMEOUT_MS = 5_000L
+    private const val MAX_RETRIES = 1
+    private val MIN_TIME_BETWEEN_SYNCS_MS = 60_000L
 
     private var firestore: FirebaseFirestore? = null
     private var userId: String? = null
 
-    /**
-     * Initialize — call once from WatchdogService.onCreate()
-     */
+    @Volatile
+    private var lastSyncAttemptTime = 0L
+
     fun init(context: Context) {
         try {
             if (FirebaseApp.getApps(context).isEmpty()) {
                 FirebaseApp.initializeApp(context)
             }
 
-            // 🔥 Enable offline persistence (50MB cache)
             val settings = FirebaseFirestoreSettings.Builder()
                 .setPersistenceEnabled(true)
                 .setCacheSizeBytes(FirebaseFirestoreSettings.CACHE_SIZE_UNLIMITED)
@@ -65,13 +53,17 @@ object FirestoreClient {
 
     fun getUserId(): String? = userId
 
-    /**
-     * Execute Firestore task with timeout + retry + exponential backoff
-     */
     private suspend fun <T> executeWithRetry(
         operationName: String,
         block: suspend () -> com.google.android.gms.tasks.Task<T>
     ): T? {
+        val now = System.currentTimeMillis()
+        if (now - lastSyncAttemptTime < MIN_TIME_BETWEEN_SYNCS_MS) {
+            Log.d(TAG, "⏭️ $operationName skipped (60s rate limit)")
+            return null
+        }
+        lastSyncAttemptTime = now
+
         var attempt = 0
         var lastError: Exception? = null
 
@@ -83,29 +75,24 @@ object FirestoreClient {
                 if (result != null) {
                     return result
                 } else {
-                    Log.w(TAG, "⚠️ $operationName timed out (attempt ${attempt + 1}/$MAX_RETRIES)")
+                    Log.w(TAG, "⚠️ $operationName timed out")
                     lastError = Exception("Timeout")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ $operationName attempt ${attempt + 1} failed: ${e.message}")
+                Log.e(TAG, "❌ $operationName failed: ${e.message}")
                 lastError = e
             }
 
             attempt++
             if (attempt < MAX_RETRIES) {
-                // Exponential backoff: 2s, 4s
-                val delayMs = 2000L * attempt
-                kotlinx.coroutines.delay(delayMs)
+                kotlinx.coroutines.delay(2_000L)
             }
         }
 
-        Log.e(TAG, "💥 $operationName failed after $MAX_RETRIES attempts")
+        Log.e(TAG, "💥 $operationName failed after $attempt attempts")
         return null
     }
 
-    /**
-     * Write child_live_data (location, battery, network, etc.)
-     */
     suspend fun writeLiveData(data: Map<String, Any?>): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false
@@ -123,9 +110,6 @@ object FirestoreClient {
         return false
     }
 
-    /**
-     * Write usage_data/{uid}/daily/{dateKey}
-     */
     suspend fun writeUsageData(dateKey: String, data: Map<String, Any?>): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false
@@ -145,9 +129,6 @@ object FirestoreClient {
         return false
     }
 
-    /**
-     * Write installed_apps
-     */
     suspend fun writeInstalledApps(data: Map<String, Any?>): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false
@@ -165,9 +146,6 @@ object FirestoreClient {
         return false
     }
 
-    /**
-     * Write heartbeat (every 60s)
-     */
     suspend fun writeHeartbeat(batteryLevel: Int, isCharging: Boolean): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false
@@ -189,10 +167,6 @@ object FirestoreClient {
         return result != null
     }
 
-    /**
-     * Read child_control document (for sync_request)
-     * 🔥 Returns Map directly (suspend) — was callback in v1
-     */
     suspend fun getChildControl(): Map<String, Any?>? {
         val uid = userId ?: return null
         val db = firestore ?: return null
@@ -208,9 +182,6 @@ object FirestoreClient {
         }
     }
 
-    /**
-     * Update child_control (clear sync_request, set last_sync)
-     */
     suspend fun updateSyncComplete(): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false

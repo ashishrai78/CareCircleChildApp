@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ============ CORE POLICIES (essential for parental control) ============ -->
+
+    <!-- Lock device remotely (parent can lock child's phone) -->
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+
+    <!-- Reset/change device password (parent can set new password) -->
+    <uses-policies>
+        <reset-password />
+    </uses-policies>
+
+    <!-- Disable camera (parent can disable child's camera remotely) -->
+    <uses-policies>
+        <disable-camera />
+    </uses-policies>
+
+    <!-- Disable keyguard features (fingerprint unlock, face unlock, etc.) -->
+    <uses-policies>
+        <disable-keyguard-features />
+    </uses-policies>
+
+    <!-- Watch login attempts (track failed unlocks) -->
+    <uses-policies>
+        <watch-login />
+    </uses-policies>
+
+    <!-- Set password quality rules (require PIN/password strength) -->
+    <uses-policies>
+        <limit-password />
+    </uses-policies>
+
+    <!-- Expire password (force password change after X days) -->
+    <uses-policies>
+        <expire-password />
+    </uses-policies>
+
+    <!-- Wipe data (emergency factory reset — use with caution) -->
+    <uses-policies>
+        <wipe-data />
+    </uses-policies>
+
+    <!-- Encrypted storage requirement -->
+    <uses-policies>
+        <encrypted-storage />
+    </uses-policies>
+
+</device-admin>

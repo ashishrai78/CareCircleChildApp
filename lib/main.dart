@@ -39,7 +39,7 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
   // Initialize accessibility event stream
-  _accessibilityEventController = StreamController<String>.broadcast();
+  //_accessibilityEventController = StreamController<String>.broadcast();
 
   try {
     await GetStorage.init();
@@ -130,13 +130,10 @@ void _setupAccessibilityEventListener() {
 /// 🔥 Auth state listener — restarts watchdog with new UID on login
 void _setupAuthStateListener() {
   try {
-    // Listen to GetStorage changes (AuthenticationRepository writes UID here)
-    // We use a periodic check since GetStorage has no built-in change stream
     Timer.periodic(const Duration(seconds: 5), (timer) async {
       try {
         final currentUid = GetStorage().read<String>('currentUserId');
-        final lastNotifiedUid =
-        GetStorage().read<String>('lastNotifiedUidToNative');
+        final lastNotifiedUid = GetStorage().read<String>('lastNotifiedUidToNative');
 
         if (currentUid != null && currentUid != lastNotifiedUid) {
           debugPrint("🔄 UID changed — notifying native: $currentUid");
@@ -144,17 +141,13 @@ void _setupAuthStateListener() {
             const platform = MethodChannel('watchdog_channel');
             await platform.invokeMethod('setUserId', {'uid': currentUid});
             await GetStorage().write('lastNotifiedUidToNative', currentUid);
-
-            // Restart watchdog to pick up new UID
             await platform.invokeMethod('startWatchdog');
             debugPrint("✅ Watchdog restarted with new UID");
           } catch (e) {
             debugPrint("🔥 Native UID notify failed: $e");
           }
         }
-      } catch (e) {
-        // Silent fail — don't crash timer
-      }
+      } catch (e) {}
     });
   } catch (e) {
     debugPrint("🔥 Auth state listener setup failed: $e");

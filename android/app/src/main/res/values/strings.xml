@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- ============ DEVICE ADMIN ============ -->
+    <string name="device_admin_label">CareCircle Protection</string>
+    <string name="device_admin_description">CareCircle protects your child\'s device by preventing unauthorized uninstall, force-stop, and providing remote lock capabilities. This is essential for child safety monitoring.</string>
+
+    <!-- ============ ACCESSIBILITY (add if missing) ============ -->
     <string name="accessibility_service_description">CareCircle protects your child by monitoring device activity and ensuring continuous safety tracking.</string>
     <string name="accessibility_service_summary">Required to keep monitoring active and prevent the app from being killed by battery optimization</string>
 </resources>

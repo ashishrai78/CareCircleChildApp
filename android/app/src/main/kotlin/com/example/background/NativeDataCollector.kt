@@ -248,20 +248,29 @@ class NativeDataCollector(private val context: Context) {
         scope.launch {
             try {
                 val uid = getUserId()
-                if (uid.isNullOrEmpty()) return@launch
+                if (uid.isNullOrEmpty()) {
+                    Log.w(TAG, "⚠️ Heartbeat skipped — no UID")
+                    return@launch
+                }
                 FirestoreClient.setUserId(uid)
 
                 val battery = withContext(Dispatchers.IO) {
                     deviceInfoProvider.getBatteryInfo()
                 }
 
-                FirestoreClient.writeHeartbeat(
+                // 🔥 FIX: Check return value before logging success
+                val success = FirestoreClient.writeHeartbeat(
                     batteryLevel = (battery?.get("level") as? Int) ?: -1,
                     isCharging = (battery?.get("isCharging") as? Boolean) ?: false
                 )
-                Log.d(TAG, "✅ Heartbeat sent")
+
+                if (success) {
+                    Log.d(TAG, "✅ Heartbeat sent successfully")
+                } else {
+                    Log.w(TAG, "⚠️ Heartbeat failed (Firestore timeout/error)")
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Heartbeat failed: ${e.message}")
+                Log.e(TAG, "❌ Heartbeat exception: ${e.message}")
             }
         }
     }

@@ -1,3 +1,4 @@
+import 'package:background/features/childsetup/screens/widgets/device_admin_setup_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -144,7 +145,10 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen> {
         case 6: // Battery Optimization
           await OemPermissionService.requestIgnoreBatteryOptimization();
           break;
-        case 7: // OEM AutoStart
+        case 7:
+          DeviceAdminSetupCard();
+          break;
+        case 8: // OEM AutoStart
           if (_needsAutoStart) {
             await OemPermissionService.openAutoStartSettings();
             await Future.delayed(const Duration(seconds: 1));
@@ -177,7 +181,7 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen> {
       snackPosition: SnackPosition.BOTTOM,
       duration: const Duration(seconds: 3),
     );
-    Get.offAll(()=> ChildCodeDisplayScreen());
+    Get.offAll(()=> DeviceAdminSetupCard());
   }
 
   void _skipStep() {

@@ -24,33 +24,32 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * 🛡️ PRODUCTION WatchdogService (v4 — stable on OEM ROMs)
- *
- * Critical fixes vs v3:
- *  1. Uses `specialUse` FGS type — no 6-hour kill limit (Android 14+)
- *  2. Indefinite WakeLock with auto-renew (no 10-min expiry → Doze kill)
- *  3. `isServiceRunning()` check before pinging Flutter service (no repeated startForegroundService)
- *  4. Heavy sync operations on IO dispatcher (no main-thread ANR)
- *  5. `setAndAllowWhileIdle` for restart alarm (wakes in Doze)
- *  6. CoroutineScope cancelled cleanly in onDestroy
+ * 🛡️ PRODUCTION WatchdogService (v5 — REALME STABLE)
  */
 class WatchdogService : Service() {
 
     companion object {
         private const val TAG = "WATCHDOG"
-        private const val CHANNEL_ID = "watchdog_channel_v4"
+        private const val CHANNEL_ID = "watchdog_channel_v5"
         private const val NOTIFICATION_ID = 1001
         private const val FLUTTER_SERVICE_CLASS = "id.flutter.flutter_background_service.BackgroundService"
 
-        private const val PING_INTERVAL_MS = 30_000L              // 30s — service ping
-        private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L // 4 min — renew before 5-min safe limit
-        private const val ACCESSIBILITY_PING_INTERVAL_MS = 60_000L
-        private const val HEARTBEAT_INTERVAL_MS = 60_000L          // 60s
-        private const val FULL_SYNC_INTERVAL_MS = 5 * 60_000L      // 5 min
-        private const val APPS_SYNC_INTERVAL_MS = 6 * 60 * 60_000L // 6 hours
-        private const val SYNC_REQUEST_CHECK_MS = 30_000L          // 30s
+        private const val PING_INTERVAL_MS = 60_000L
+        private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L
+        private const val ACCESSIBILITY_PING_INTERVAL_MS = 90_000L
+        private const val HEARTBEAT_INTERVAL_MS = 3 * 60_000L
+        private const val FULL_SYNC_INTERVAL_MS = 10 * 60_000L
+        private const val APPS_SYNC_INTERVAL_MS = 6 * 60 * 60_000L
+        private const val SYNC_REQUEST_CHECK_MS = 2 * 60_000L
 
         private const val WAKE_LOCK_TAG = "CareCircle::WatchdogWakeLock"
+
+        private const val ACCESSIBILITY_CONFIRMATION_CHECKS = 3
+        private const val ACCESSIBILITY_RECHECK_INTERVAL_MS = 30_000L
+
+        private const val PREFS_NAME = "carecircle_prefs"
+        private const val KEY_LAST_ACCESSIBILITY_NOTIFY = "last_accessibility_notify"
+        private const val ACCESSIBILITY_NOTIFY_THROTTLE_MS = 5 * 60_000L
 
         fun start(context: Context) {
             val intent = Intent(context, WatchdogService::class.java)
@@ -66,9 +65,6 @@ class WatchdogService : Service() {
             }
         }
 
-        /**
-         * Check if WatchdogService is currently running (for MainActivity.onResume check)
-         */
         fun isRunning(context: Context): Boolean {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
             @Suppress("DEPRECATION")
@@ -89,23 +85,20 @@ class WatchdogService : Service() {
     private var lastSyncRequestCheck = 0L
     private var lastWakeLockRenew = 0L
 
+    private var accessibilityDisabledCheckCount = 0
+
     private lateinit var dataCollector: NativeDataCollector
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "✅ WatchdogService created")
+        Log.d(TAG, "✅ WatchdogService created (v5)")
 
-        // 🔥 CRITICAL: startForeground() within 5 sec of startForegroundService()
         try {
             createNotificationChannel()
             val notification = buildNotification()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -114,7 +107,13 @@ class WatchdogService : Service() {
             Log.e(TAG, "❌ startForeground FAILED in onCreate: ${e.message}")
         }
 
-        // Initialize native Firebase + data collector
+        try {
+            val isAdminEnabled = CareCircleDeviceAdminReceiver.isEnabled(this)
+            Log.d(TAG, "🔒 Device Admin status: ${if (isAdminEnabled) "ENABLED" else "DISABLED"}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Device Admin check failed: ${e.message}")
+        }
+
         try {
             FirestoreClient.init(this)
             dataCollector = NativeDataCollector(this)
@@ -123,14 +122,12 @@ class WatchdogService : Service() {
             Log.e(TAG, "❌ Data collector init failed: ${e.message}")
         }
 
-        // 🔥 Indefinite WakeLock (no 10-min expiry)
         try {
             acquireWakeLock()
         } catch (e: Exception) {
             Log.e(TAG, "WakeLock failed: ${e.message}")
         }
 
-        // Start watchdog loop
         handler.post(watchdogRunnable)
     }
 
@@ -144,13 +141,10 @@ class WatchdogService : Service() {
         try {
             val restartIntent = Intent(applicationContext, WatchdogService::class.java)
             val pendingIntent = PendingIntent.getService(
-                this,
-                1,
-                restartIntent,
+                this, 1, restartIntent,
                 PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
             )
             val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            // 🔥 FIX: setAndAllowWhileIdle wakes device in Doze mode
             try {
                 alarmManager.setAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
@@ -158,7 +152,6 @@ class WatchdogService : Service() {
                     pendingIntent
                 )
             } catch (se: SecurityException) {
-                // Android 12+ may require SCHEDULE_EXACT_ALARM permission
                 Log.w(TAG, "setAndAllowWhileIdle failed, using regular set: ${se.message}")
                 alarmManager.set(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
@@ -175,38 +168,33 @@ class WatchdogService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "❌ WatchdogService destroyed")
         handler.removeCallbacks(watchdogRunnable)
-        serviceScope.cancel()  // 🔥 Cancel all coroutines
+        serviceScope.cancel()
         releaseWakeLock()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ============ Watchdog loop ============
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             try {
                 val now = System.currentTimeMillis()
 
-                // 🔥 WakeLock renew (indefinite lock may get released by system)
                 if (now - lastWakeLockRenew >= WAKELOCK_RENEW_INTERVAL_MS) {
                     renewWakeLock()
                     lastWakeLockRenew = now
                 }
 
-                // 1. Ping Flutter service (30s) — with running check
                 if (now - lastFlutterPing >= PING_INTERVAL_MS) {
                     ensureFlutterServiceRunning()
                     lastFlutterPing = now
                 }
 
-                // 2. Check accessibility (60s)
                 if (now - lastAccessibilityPing >= ACCESSIBILITY_PING_INTERVAL_MS) {
                     ensureAccessibilityServiceRunning()
                     lastAccessibilityPing = now
                 }
 
-                // 3. 📊 DATA COLLECTION — on IO dispatcher (no ANR)
                 if (::dataCollector.isInitialized) {
                     if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                         serviceScope.launch {
@@ -249,9 +237,6 @@ class WatchdogService : Service() {
         }
     }
 
-    /**
-     * Check if parent requested sync (sync_request = true in child_control)
-     */
     private suspend fun checkSyncRequest() {
         try {
             FirestoreClient.getChildControl()?.let { data ->
@@ -267,18 +252,9 @@ class WatchdogService : Service() {
         }
     }
 
-    // ============ Private helpers ============
-
-    /**
-     * 🔥 FIX: Only start Flutter service if NOT already running
-     * Repeated startForegroundService() calls trigger OEM battery optimization
-     */
     private fun ensureFlutterServiceRunning() {
         try {
-            if (isFlutterServiceRunning()) {
-                // Already running — skip
-                return
-            }
+            if (isFlutterServiceRunning()) return
 
             val intent = Intent().apply {
                 setClassName(applicationContext, FLUTTER_SERVICE_CLASS)
@@ -288,7 +264,6 @@ class WatchdogService : Service() {
                     startForegroundService(intent)
                     Log.d(TAG, "🔄 Flutter service started (was not running)")
                 } catch (e: Exception) {
-                    // Android 12+ may throw ForegroundServiceStartNotAllowedException
                     Log.w(TAG, "Foreground start failed: ${e.message}")
                     try {
                         startService(intent)
@@ -311,40 +286,143 @@ class WatchdogService : Service() {
             val services = am.getRunningServices(Int.MAX_VALUE)
             services.any { it.service.className == FLUTTER_SERVICE_CLASS }
         } catch (e: Exception) {
-            false  // On error, assume not running (will try to start)
+            false
         }
     }
 
     private fun ensureAccessibilityServiceRunning() {
         try {
-            val enabledServices = android.provider.Settings.Secure.getString(
-                contentResolver,
-                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ) ?: ""
-            val serviceName = "$packageName/.AccessibilityWatchdogService"
-            if (!enabledServices.contains(serviceName)) {
-                Log.w(TAG, "⚠️ Accessibility service DISABLED — notifying app")
+            val isActuallyEnabled = checkAccessibilityEnabledReliably()
 
-                // 🔥 Notify app to show re-enable prompt
-                val broadcastIntent = Intent("com.example.background.ACCESSIBILITY_REVOKED")
-                sendBroadcast(broadcastIntent)
-
-                // Also try to bring app to foreground
-                try {
-                    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-                    launchIntent?.addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    )
-                    launchIntent?.putExtra("ACCESSIBILITY_REVOKED", true)
-                    startActivity(launchIntent)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to launch app: ${e.message}")
+            if (isActuallyEnabled) {
+                if (accessibilityDisabledCheckCount > 0) {
+                    Log.d(TAG, "✅ Accessibility re-enabled (false alarm cleared)")
                 }
-            } else {
-                Log.d(TAG, "✅ Accessibility service enabled")
+                accessibilityDisabledCheckCount = 0
+                return
             }
+
+            accessibilityDisabledCheckCount++
+            Log.w(TAG, "⚠️ Accessibility appears disabled (check ${accessibilityDisabledCheckCount}/$ACCESSIBILITY_CONFIRMATION_CHECKS)")
+
+            if (accessibilityDisabledCheckCount < ACCESSIBILITY_CONFIRMATION_CHECKS) {
+                handler.postDelayed({
+                    ensureAccessibilityServiceRunning()
+                }, ACCESSIBILITY_RECHECK_INTERVAL_MS)
+                return
+            }
+
+            accessibilityDisabledCheckCount = 0
+            handleAccessibilityDisabledConfirmed()
+
         } catch (e: Exception) {
             Log.e(TAG, "Accessibility check failed: ${e.message}")
+        }
+    }
+
+    private fun checkAccessibilityEnabledReliably(): Boolean {
+        return try {
+            val am = getSystemService(Context.ACCESSIBILITY_SERVICE)
+                    as android.view.accessibility.AccessibilityManager
+
+            if (am.isEnabled) {
+                val enabledServices = am.getEnabledAccessibilityServiceList(
+                    android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_GENERIC
+                )
+                val serviceName = "$packageName/.AccessibilityWatchdogService"
+
+                val isActuallyEnabled = enabledServices.any {
+                    it.resolveInfo.serviceInfo.let { si ->
+                        "${si.packageName}/${si.name}" == serviceName
+                    }
+                }
+
+                if (isActuallyEnabled) return true
+            }
+
+            try {
+                val enabledServicesStr = android.provider.Settings.Secure.getString(
+                    contentResolver,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                ) ?: ""
+                val serviceName = "$packageName/.AccessibilityWatchdogService"
+                enabledServicesStr.contains(serviceName)
+            } catch (e: Exception) {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Reliable check failed: ${e.message}")
+            true
+        }
+    }
+
+    private fun handleAccessibilityDisabledConfirmed() {
+        Log.w(TAG, "🚨 Accessibility CONFIRMED disabled — showing notification")
+
+        val now = System.currentTimeMillis()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val lastNotifyTime = prefs.getLong(KEY_LAST_ACCESSIBILITY_NOTIFY, 0L)
+
+        if (now - lastNotifyTime < ACCESSIBILITY_NOTIFY_THROTTLE_MS) {
+            Log.d(TAG, "Skipping notification (5-min throttle active)")
+            return
+        }
+
+        prefs.edit().putLong(KEY_LAST_ACCESSIBILITY_NOTIFY, now).apply()
+
+        try {
+            val broadcastIntent = Intent("com.example.background.ACCESSIBILITY_REVOKED")
+            sendBroadcast(broadcastIntent)
+            Log.d(TAG, "📡 Broadcasted ACCESSIBILITY_REVOKED to Flutter")
+        } catch (e: Exception) {
+            Log.e(TAG, "Broadcast failed: ${e.message}")
+        }
+
+        showAccessibilityDisabledNotification()
+    }
+
+    private fun showAccessibilityDisabledNotification() {
+        try {
+            val notifChannelId = "accessibility_disabled_alert"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    notifChannelId,
+                    "Accessibility Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Alerts when accessibility is disabled"
+                    enableVibration(true)
+                    enableLights(true)
+                }
+                val manager = getSystemService(NotificationManager::class.java)
+                manager.createNotificationChannel(channel)
+            }
+
+            val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this, 2001, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(this, notifChannelId)
+                .setContentTitle("⚠️ CareCircle Protection Paused")
+                .setContentText("Tap to re-enable monitoring")
+                .setSmallIcon(R.drawable.ic_notification)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .build()
+
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(2001, notification)
+
+            Log.d(TAG, "🔔 Accessibility disabled notification shown")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show notification: ${e.message}")
         }
     }
 
@@ -375,19 +453,14 @@ class WatchdogService : Service() {
         }
     }
 
-    // ============ WakeLock management ============
-
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
         wakeLock?.setReferenceCounted(false)
-        wakeLock?.acquire()  // 🔥 Indefinite — no timeout
+        wakeLock?.acquire()
         Log.d(TAG, "✅ WakeLock acquired (indefinite)")
     }
 
-    /**
-     * 🔥 Renew WakeLock — defensive in case system released it
-     */
     private fun renewWakeLock() {
         try {
             wakeLock?.let { wl ->
@@ -411,7 +484,3 @@ class WatchdogService : Service() {
         }
     }
 }
-
-// Import alias for coroutine launch (keep at file level after class)
-//private fun CoroutineScope.launch(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) =
-//    kotlinx.coroutines.launch(this, block = block)

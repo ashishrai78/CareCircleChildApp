@@ -77,8 +77,9 @@ void onStart(ServiceInstance service) async {
   Future<void> setupControlListener() async {
     final docId = storage.read<String>('currentUserId');
     if (docId == null) {
-      debugPrint('⚠️ currentUserId missing — retrying in 30s');
-      Timer(const Duration(seconds: 30), setupControlListener);
+      debugPrint('⚠️ currentUserId missing — will retry when user logs in');
+      // 🔥 FIX: No infinite timer — just exit. setupControlListener will be called
+      // again when AuthenticationRepository sets the UID (via storage listener)
       return;
     }
 

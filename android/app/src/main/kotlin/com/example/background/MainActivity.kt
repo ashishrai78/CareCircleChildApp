@@ -45,6 +45,7 @@ class MainActivity : FlutterActivity() {
     private val TAG = "MAIN_ACTIVITY"
 
     // Channels
+    private lateinit var deviceAdminChannel: MethodChannel
     private lateinit var watchdogChannel: MethodChannel
     private lateinit var locationChannel: MethodChannel
     private lateinit var usageChannel: MethodChannel
@@ -75,9 +76,69 @@ class MainActivity : FlutterActivity() {
         setupDeviceChannel(flutterEngine)
         setupPermissionsChannel(flutterEngine)
         setupAccessibilityEventChannel(flutterEngine)
+        setupDeviceAdminChannel(flutterEngine)
 
         // 🔥 Register receiver for accessibility revoked broadcast
         registerAccessibilityRevokedReceiver()
+    }
+
+    // ============ DEVICE ADMIN CHANNEL ============
+    private fun setupDeviceAdminChannel(flutterEngine: FlutterEngine) {
+        deviceAdminChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "device_admin_channel"
+        )
+
+        deviceAdminChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isDeviceAdminEnabled" -> {
+                    result.success(CareCircleDeviceAdminReceiver.isEnabled(this))
+                }
+                "openDeviceAdminSettings" -> {
+                    val success = CareCircleDeviceAdminReceiver.openEnableScreen(this)
+                    result.success(success)
+                }
+                "disableDeviceAdmin" -> {
+                    val success = CareCircleDeviceAdminReceiver.disable(this)
+                    result.success(success)
+                }
+                "lockDeviceNow" -> {
+                    // 🔥 Remote lock — parent can lock child's device
+                    val success = try {
+                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
+                                as android.app.admin.DevicePolicyManager
+                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
+                            dpm.lockNow()
+                            true
+                        } else false
+                    } catch (e: Exception) {
+                        Log.e(TAG, "lockDeviceNow failed: ${e.message}")
+                        false
+                    }
+                    result.success(success)
+                }
+                "disableCamera" -> {
+                    // 🔥 Disable camera (parental control feature)
+                    val disable = call.argument<Boolean>("disable") ?: true
+                    val success = try {
+                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
+                                as android.app.admin.DevicePolicyManager
+                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
+                            dpm.setCameraDisabled(
+                                CareCircleDeviceAdminReceiver.getComponentName(this),
+                                disable
+                            )
+                            true
+                        } else false
+                    } catch (e: Exception) {
+                        Log.e(TAG, "disableCamera failed: ${e.message}")
+                        false
+                    }
+                    result.success(success)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     // ============ WATCHDOG CHANNEL ============
