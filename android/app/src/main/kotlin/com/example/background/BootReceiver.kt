@@ -11,13 +11,13 @@ import androidx.work.WorkManager
 import java.util.concurrent.TimeUnit
 
 /**
- * 🛡️ PRODUCTION BootReceiver (v2)
+ * 🛡️ PRODUCTION BootReceiver (v3 — Option B architecture)
  *
- * Fixes vs v1:
- *  1. Removed LOCKED_BOOT_COMPLETED (was crashing — app not directBootAware)
- *  2. Uses WorkManager fallback for Android 12+ FGS start restrictions
- *  3. goAsync() for long-running operations (10 sec window)
- *  4. Proper ForegroundServiceStartNotAllowedException handling
+ * Fixes vs v2:
+ *  1. Starts CareCircleForegroundService (was WatchdogService)
+ *  2. Schedules all workers via CareCircleWorkScheduler
+ *  3. Removed LOCKED_BOOT_COMPLETED (was crashing)
+ *  4. Uses goAsync() for long operations
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -25,7 +25,6 @@ class BootReceiver : BroadcastReceiver() {
         private const val TAG = "BOOT_RECEIVER"
         private const val FLUTTER_SERVICE_CLASS =
             "id.flutter.flutter_background_service.BackgroundService"
-        private const val FALLBACK_WORK_NAME = "watchdog_fallback_boot"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -36,13 +35,12 @@ class BootReceiver : BroadcastReceiver() {
             "android.intent.action.QUICKBOOT_POWERON",
             "com.htc.intent.action.QUICKBOOT_POWERON",
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                // 🔥 goAsync() — gives 10 sec window (default onReceive is 10ms)
                 val pendingResult = goAsync()
 
                 Thread {
                     try {
                         startAllServices(context)
-                        scheduleFallbackWork(context)
+                        CareCircleWorkScheduler.scheduleAll(context)
                     } catch (e: Exception) {
                         Log.e(TAG, "❌ Boot init failed: ${e.message}")
                     } finally {
@@ -54,15 +52,15 @@ class BootReceiver : BroadcastReceiver() {
     }
 
     private fun startAllServices(context: Context) {
-        // 1. Start native WatchdogService
+        // 1. Start CareCircleForegroundService (master service)
         try {
-            WatchdogService.start(context)
-            Log.d(TAG, "✅ WatchdogService started")
+            CareCircleForegroundService.start(context)
+            Log.d(TAG, "✅ CareCircleForegroundService started")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ WatchdogService start failed: ${e.message}")
+            Log.e(TAG, "❌ ForegroundService start failed: ${e.message}")
         }
 
-        // 2. Start Flutter BackgroundService (with Android 12+ exception handling)
+        // 2. Start Flutter BackgroundService (for WebRTC mic streaming)
         try {
             val flutterIntent = Intent().apply {
                 setClassName(context, FLUTTER_SERVICE_CLASS)
@@ -73,14 +71,11 @@ class BootReceiver : BroadcastReceiver() {
                     context.startForegroundService(flutterIntent)
                     Log.d(TAG, "✅ Flutter service started (foreground)")
                 } catch (e: Exception) {
-                    // Android 12+ ForegroundServiceStartNotAllowedException
                     Log.w(TAG, "⚠️ Foreground start failed: ${e.message}")
                     try {
                         context.startService(flutterIntent)
-                        Log.d(TAG, "✅ Flutter service started (regular)")
                     } catch (e2: Exception) {
                         Log.e(TAG, "❌ All Flutter service start attempts failed: ${e2.message}")
-                        // Fallback to WorkManager — handled by scheduleFallbackWork
                     }
                 }
             } else {
@@ -89,27 +84,6 @@ class BootReceiver : BroadcastReceiver() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Flutter service start failed: ${e.message}")
-        }
-    }
-
-    /**
-     * 🔥 NEW: Real WorkManager fallback (was empty log in v1)
-     * Periodic check every 15 min — revives services if killed
-     */
-    private fun scheduleFallbackWork(context: Context) {
-        try {
-            val request = PeriodicWorkRequestBuilder<WatchdogRestartWorker>(
-                15, TimeUnit.MINUTES
-            ).build()
-
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                FALLBACK_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
-                request
-            )
-            Log.d(TAG, "✅ WorkManager fallback scheduled (15 min periodic)")
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ WorkManager schedule failed: ${e.message}")
         }
     }
 }

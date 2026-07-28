@@ -20,32 +20,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 🛡️ PRODUCTION MainActivity (v2)
+ * 🛡️ PRODUCTION MainActivity (v3 — Option B architecture)
  *
- * Fixes vs v1:
- *  1. Fixed inverted `isBatteryOptimized()` semantics
- *  2. Heavy operations (getInstalledApps, getAppUsage) on IO dispatcher
- *  3. try/catch on all Intent launches (OEM-specific ActivityNotFoundException)
- *  4. onResume() re-verifies watchdog alive
- *  5. EventChannel for accessibility revoked notifications
- *
- * Method Channels registered:
- *  1. watchdog_channel    — start/stop watchdog, OEM helpers, app hider
- *  2. location_channel    — fused location
- *  3. usage_channel       — screen time
- *  4. apps_channel        — installed apps + icons
- *  5. device_channel      — device info, battery, network, RAM, storage
- *  6. permissions_channel — runtime permission flow
- *
- * Event Channels:
- *  1. accessibility_events — broadcasts ACCESSIBILITY_REVOKED to Flutter
+ * Changes vs v2:
+ *  1. Calls CareCircleForegroundService.start() (was WatchdogService)
+ *  2. Calls CareCircleWorkScheduler.scheduleAll() on app launch
+ *  3. onResume() checks CareCircleForegroundService.isRunning()
  */
 class MainActivity : FlutterActivity() {
 
     private val TAG = "MAIN_ACTIVITY"
 
-    // Channels
-    private lateinit var deviceAdminChannel: MethodChannel
     private lateinit var watchdogChannel: MethodChannel
     private lateinit var locationChannel: MethodChannel
     private lateinit var usageChannel: MethodChannel
@@ -53,17 +38,16 @@ class MainActivity : FlutterActivity() {
     private lateinit var deviceChannel: MethodChannel
     private lateinit var permissionsChannel: MethodChannel
     private lateinit var accessibilityEventChannel: EventChannel
+    private lateinit var deviceAdminChannel: MethodChannel
+    private lateinit var appBlockerChannel: MethodChannel  // 🔥 NEW
 
-    // IO scope for heavy operations
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // Providers (lazy init)
     private val locationProvider by lazy { LocationProvider(this) }
     private val usageStatsProvider by lazy { UsageStatsProvider(this) }
     private val appsProvider by lazy { AppsProvider(this) }
     private val deviceInfoProvider by lazy { DeviceInfoProvider(this) }
 
-    // Accessibility event sink (Flutter → native)
     private var accessibilitySink: EventChannel.EventSink? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -77,71 +61,15 @@ class MainActivity : FlutterActivity() {
         setupPermissionsChannel(flutterEngine)
         setupAccessibilityEventChannel(flutterEngine)
         setupDeviceAdminChannel(flutterEngine)
+        setupAppBlockerChannel(flutterEngine)  // 🔥 NEW
 
-        // 🔥 Register receiver for accessibility revoked broadcast
         registerAccessibilityRevokedReceiver()
+
+        // 🔥 Schedule all WorkManager workers
+        CareCircleWorkScheduler.scheduleAll(this)
     }
 
-    // ============ DEVICE ADMIN CHANNEL ============
-    private fun setupDeviceAdminChannel(flutterEngine: FlutterEngine) {
-        deviceAdminChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            "device_admin_channel"
-        )
-
-        deviceAdminChannel.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "isDeviceAdminEnabled" -> {
-                    result.success(CareCircleDeviceAdminReceiver.isEnabled(this))
-                }
-                "openDeviceAdminSettings" -> {
-                    val success = CareCircleDeviceAdminReceiver.openEnableScreen(this)
-                    result.success(success)
-                }
-                "disableDeviceAdmin" -> {
-                    val success = CareCircleDeviceAdminReceiver.disable(this)
-                    result.success(success)
-                }
-                "lockDeviceNow" -> {
-                    // 🔥 Remote lock — parent can lock child's device
-                    val success = try {
-                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
-                                as android.app.admin.DevicePolicyManager
-                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
-                            dpm.lockNow()
-                            true
-                        } else false
-                    } catch (e: Exception) {
-                        Log.e(TAG, "lockDeviceNow failed: ${e.message}")
-                        false
-                    }
-                    result.success(success)
-                }
-                "disableCamera" -> {
-                    // 🔥 Disable camera (parental control feature)
-                    val disable = call.argument<Boolean>("disable") ?: true
-                    val success = try {
-                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
-                                as android.app.admin.DevicePolicyManager
-                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
-                            dpm.setCameraDisabled(
-                                CareCircleDeviceAdminReceiver.getComponentName(this),
-                                disable
-                            )
-                            true
-                        } else false
-                    } catch (e: Exception) {
-                        Log.e(TAG, "disableCamera failed: ${e.message}")
-                        false
-                    }
-                    result.success(success)
-                }
-                else -> result.notImplemented()
-            }
-        }
-    }
-
-    // ============ WATCHDOG CHANNEL ============
+    // ============ WATCHDOG CHANNEL (now controls ForegroundService) ============
     private fun setupWatchdogChannel(flutterEngine: FlutterEngine) {
         watchdogChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -151,11 +79,12 @@ class MainActivity : FlutterActivity() {
         watchdogChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "startWatchdog" -> {
-                    WatchdogService.start(this)
+                    // 🔥 Now starts CareCircleForegroundService instead of WatchdogService
+                    CareCircleForegroundService.start(this)
                     result.success(true)
                 }
                 "stopWatchdog" -> {
-                    stopService(Intent(this, WatchdogService::class.java))
+                    stopService(Intent(this, CareCircleForegroundService::class.java))
                     result.success(true)
                 }
                 "setUserId" -> {
@@ -180,14 +109,12 @@ class MainActivity : FlutterActivity() {
                     result.success(success)
                 }
                 "isBatteryOptimized" -> {
-                    // 🔥 FIX: Return TRUE if device is OPTIMIZING (i.e., killing) the app
                     result.success(!isIgnoringBatteryOptimizations())
                 }
                 "requestIgnoreBatteryOptimization" -> {
                     requestIgnoreBatteryOptimization()
                     result.success(true)
                 }
-                // ============ OEM AUTOSTART METHODS ============
                 "openAutoStartSettings" -> {
                     result.success(AutoStartHelper.openAutoStartSettings(this))
                 }
@@ -209,7 +136,6 @@ class MainActivity : FlutterActivity() {
                 "getManufacturer" -> {
                     result.success(AutoStartHelper.getManufacturer())
                 }
-                // ============ APP HIDING METHODS ============
                 "hideApp" -> {
                     result.success(AppHider.hideApp(this))
                 }
@@ -297,7 +223,6 @@ class MainActivity : FlutterActivity() {
                 "getAppUsage" -> {
                     val startMs = call.argument<Long>("startMs") ?: 0L
                     val endMs = call.argument<Long>("endMs") ?: System.currentTimeMillis()
-                    // 🔥 Heavy op — IO dispatcher
                     ioScope.launch {
                         val data = usageStatsProvider.getAppUsage(startMs, endMs)
                         withContext(Dispatchers.Main) { result.success(data) }
@@ -334,7 +259,6 @@ class MainActivity : FlutterActivity() {
                 "getInstalledApps" -> {
                     val withIcons = call.argument<Boolean>("withIcons") ?: false
                     val excludeSystem = call.argument<Boolean>("excludeSystem") ?: true
-                    // 🔥 CRITICAL: Apps enumeration + base64 icons on IO thread
                     ioScope.launch {
                         try {
                             val apps = appsProvider.getInstalledApps(withIcons, excludeSystem)
@@ -485,22 +409,117 @@ class MainActivity : FlutterActivity() {
         })
     }
 
-    /**
-     * 🔥 Register receiver for ACCESSIBILITY_REVOKED broadcast from native services
-     */
-    private fun registerAccessibilityRevokedReceiver() {
-        AccessibilityRevokedReceiver.sinkCallback = { event ->
-            Log.d(TAG, "📡 Forwarding to Flutter: $event")
-            accessibilitySink?.success(event)
+    // ============ DEVICE ADMIN CHANNEL ============
+    private fun setupDeviceAdminChannel(flutterEngine: FlutterEngine) {
+        deviceAdminChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "device_admin_channel"
+        )
+
+        deviceAdminChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isDeviceAdminEnabled" -> {
+                    result.success(CareCircleDeviceAdminReceiver.isEnabled(this))
+                }
+                "openDeviceAdminSettings" -> {
+                    val success = CareCircleDeviceAdminReceiver.openEnableScreen(this)
+                    result.success(success)
+                }
+                "disableDeviceAdmin" -> {
+                    val success = CareCircleDeviceAdminReceiver.disable(this)
+                    result.success(success)
+                }
+                "lockDeviceNow" -> {
+                    val success = try {
+                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
+                                as android.app.admin.DevicePolicyManager
+                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
+                            dpm.lockNow()
+                            true
+                        } else false
+                    } catch (e: Exception) {
+                        Log.e(TAG, "lockDeviceNow failed: ${e.message}")
+                        false
+                    }
+                    result.success(success)
+                }
+                "disableCamera" -> {
+                    val disable = call.argument<Boolean>("disable") ?: true
+                    val success = try {
+                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE)
+                                as android.app.admin.DevicePolicyManager
+                        if (CareCircleDeviceAdminReceiver.isEnabled(this)) {
+                            dpm.setCameraDisabled(
+                                CareCircleDeviceAdminReceiver.getComponentName(this),
+                                disable
+                            )
+                            true
+                        } else false
+                    } catch (e: Exception) {
+                        Log.e(TAG, "disableCamera failed: ${e.message}")
+                        false
+                    }
+                    result.success(success)
+                }
+                else -> result.notImplemented()
+            }
         }
-        Log.d(TAG, "✅ Accessibility revoked receiver callback registered")
+    }
+
+    // ============ 🔥 NEW: APP BLOCKER CHANNEL ============
+    private fun setupAppBlockerChannel(flutterEngine: FlutterEngine) {
+        appBlockerChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "app_blocker_channel"
+        )
+
+        appBlockerChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getBlockedApps" -> {
+                    val apps = AccessibilityWatchdogService.getBlockedApps(this)
+                    result.success(apps.toList())
+                }
+                "updateBlockedApps" -> {
+                    val apps = call.argument<List<String>>("apps") ?: emptyList()
+                    AccessibilityWatchdogService.updateBlockedApps(this, apps.toSet())
+                    result.success(true)
+                }
+                "isAccessibilityEnabled" -> {
+                    result.success(AccessibilityWatchdogService.isEnabled(this))
+                }
+                "openAccessibilitySettings" -> {
+                    val success = tryStartActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    // ============ Accessibility Revoked Receiver ============
+    private fun registerAccessibilityRevokedReceiver() {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                Log.w(TAG, "⚠️ Accessibility revoked broadcast received")
+                accessibilitySink?.success("ACCESSIBILITY_REVOKED")
+            }
+        }
+
+        val filter = android.content.IntentFilter("com.example.background.ACCESSIBILITY_REVOKED")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
     }
 
     // ============ Helpers ============
-
-    /**
-     * Safe Intent launch — catches ActivityNotFoundException (OEM-specific paths)
-     */
     private fun tryStartActivity(intent: Intent): Boolean {
         return try {
             startActivity(intent)
@@ -514,9 +533,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /**
-     * 🔥 FIX: Correct semantics — returns TRUE if app is exempt from battery optimization
-     */
     private fun isIgnoringBatteryOptimizations(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -545,27 +561,21 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WatchdogService.start(this)
+        // 🔥 Start master foreground service
+        CareCircleForegroundService.start(this)
     }
 
-    /**
-     * 🔥 NEW: Re-verify watchdog alive on every app resume
-     */
     override fun onResume() {
         super.onResume()
-        if (!WatchdogService.isRunning(this)) {
-            Log.d(TAG, "🔄 WatchdogService not running — restarting on resume")
-            WatchdogService.start(this)
+        // 🔥 Re-verify service alive on every app resume
+        if (!CareCircleForegroundService.isRunning(this)) {
+            Log.d(TAG, "🔄 ForegroundService not running — restarting on resume")
+            CareCircleForegroundService.start(this)
         }
     }
 
     override fun onDestroy() {
-        AccessibilityRevokedReceiver.sinkCallback = null  // 🔥 Clear callback
         super.onDestroy()
-        ioScope.cancel()  // 🔥 Cancel all coroutines
+        ioScope.cancel()
     }
-
-//    private fun CoroutineScope.cancel() {
-//        kotlinx.coroutines.cancel(this)
-//    }
 }

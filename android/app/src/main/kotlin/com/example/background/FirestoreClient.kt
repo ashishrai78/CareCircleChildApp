@@ -11,20 +11,26 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * 🔥 NATIVE Firestore Client (v3 — Realme-optimized)
+ * 🔥 NATIVE Firestore Client (v4 — Sync-Friendly)
+ *
+ * Fixes vs v3:
+ *  1. ❌ REMOVED global 60s rate limit (was blocking sync_request flow)
+ *  2. ✅ Per-operation throttle (each operation has its own 30s throttle)
+ *  3. ✅ updateSyncComplete() BYPASSES throttle (parent needs immediate feedback)
+ *  4. ✅ Timeout 5s, 1 retry (kept from v3)
  */
 object FirestoreClient {
 
     private const val TAG = "FirestoreClient"
     private const val TIMEOUT_MS = 5_000L
     private const val MAX_RETRIES = 1
-    private val MIN_TIME_BETWEEN_SYNCS_MS = 60_000L
+
+    // 🔥 Per-operation throttle (30s per operation type)
+    private val PER_OP_THROTTLE_MS = 30_000L
+    private val lastOpTime = mutableMapOf<String, Long>()
 
     private var firestore: FirebaseFirestore? = null
     private var userId: String? = null
-
-    @Volatile
-    private var lastSyncAttemptTime = 0L
 
     fun init(context: Context) {
         try {
@@ -53,17 +59,34 @@ object FirestoreClient {
 
     fun getUserId(): String? = userId
 
+    /**
+     * 🔥 Per-operation throttle — each operation type has its own 30s window
+     * updateSyncComplete() bypasses this (uses executeWithoutThrottle)
+     */
     private suspend fun <T> executeWithRetry(
         operationName: String,
         block: suspend () -> com.google.android.gms.tasks.Task<T>
     ): T? {
+        // 🔥 Check per-operation throttle
         val now = System.currentTimeMillis()
-        if (now - lastSyncAttemptTime < MIN_TIME_BETWEEN_SYNCS_MS) {
-            Log.d(TAG, "⏭️ $operationName skipped (60s rate limit)")
+        val lastTime = lastOpTime[operationName] ?: 0L
+        if (now - lastTime < PER_OP_THROTTLE_MS) {
+            Log.d(TAG, "⏭️ $operationName skipped (30s per-op throttle)")
             return null
         }
-        lastSyncAttemptTime = now
+        lastOpTime[operationName] = now
 
+        return executeWithoutThrottle(operationName, block)
+    }
+
+    /**
+     * 🔥 Execute without throttle check — used by updateSyncComplete()
+     * Parent needs immediate feedback that sync is done
+     */
+    private suspend fun <T> executeWithoutThrottle(
+        operationName: String,
+        block: suspend () -> com.google.android.gms.tasks.Task<T>
+    ): T? {
         var attempt = 0
         var lastError: Exception? = null
 
@@ -167,11 +190,14 @@ object FirestoreClient {
         return result != null
     }
 
+    /**
+     * 🔥 Read child_control — bypass throttle (read is cheap)
+     */
     suspend fun getChildControl(): Map<String, Any?>? {
         val uid = userId ?: return null
         val db = firestore ?: return null
 
-        val result = executeWithRetry("getChildControl") {
+        val result = executeWithoutThrottle("getChildControl") {
             db.collection("child_control")
                 .document(uid)
                 .get()
@@ -182,11 +208,16 @@ object FirestoreClient {
         }
     }
 
+    /**
+     * 🔥 CRITICAL: updateSyncComplete bypasses throttle
+     * Parent needs immediate feedback that sync is done
+     * Otherwise parent keeps sending sync_request = true
+     */
     suspend fun updateSyncComplete(): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false
 
-        val result = executeWithRetry("updateSyncComplete") {
+        val result = executeWithoutThrottle("updateSyncComplete") {
             db.collection("child_control")
                 .document(uid)
                 .update(
@@ -197,6 +228,10 @@ object FirestoreClient {
                 )
         }
 
-        return result != null
+        if (result != null) {
+            Log.d(TAG, "✅ Sync complete — parent flag cleared")
+            return true
+        }
+        return false
     }
 }

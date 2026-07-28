@@ -11,18 +11,10 @@ import androidx.work.WorkManager
 import java.util.concurrent.TimeUnit
 
 /**
- * 🛡️ PRODUCTION RestartReceiver (v2)
+ * 🛡️ PRODUCTION RestartReceiver (v3 — Option B architecture)
  *
- * Fixes vs v1:
- *  1. goAsync() — 10 sec window (default onReceive is 10ms, not enough)
- *  2. WorkManager fallback for Android 12+ FGS restrictions
- *  3. Catches ForegroundServiceStartNotAllowedException explicitly
- *  4. Exponential backoff retry via WorkManager
- *
- * Triggers on:
- *  - USER_PRESENT (phone unlocked)
- *  - CONNECTIVITY_CHANGE (network restored)
- *  - Custom RESTART_WATCHDOG broadcast
+ * Restarts CareCircleForegroundService (was WatchdogService)
+ * Uses WorkManager fallback for Android 12+ FGS restrictions
  */
 class RestartReceiver : BroadcastReceiver() {
 
@@ -31,7 +23,7 @@ class RestartReceiver : BroadcastReceiver() {
         private const val FLUTTER_SERVICE_CLASS =
             "id.flutter.flutter_background_service.BackgroundService"
         const val ACTION_RESTART_WATCHDOG = "com.example.background.RESTART_WATCHDOG"
-        private const val RESTART_WORK_NAME = "watchdog_restart_one_time"
+        private const val RESTART_WORK_NAME = "carecircle_restart_one_time"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -42,20 +34,19 @@ class RestartReceiver : BroadcastReceiver() {
             Intent.ACTION_USER_PRESENT,
             "android.net.conn.CONNECTIVITY_CHANGE" -> {
 
-                // 🔥 goAsync() — 10 sec window
                 val pendingResult = goAsync()
 
                 Thread {
                     try {
                         var started = false
 
-                        // Try direct WatchdogService start
+                        // Try direct ForegroundService start
                         try {
-                            WatchdogService.start(context)
+                            CareCircleForegroundService.start(context)
                             started = true
-                            Log.d(TAG, "✅ WatchdogService started directly")
+                            Log.d(TAG, "✅ ForegroundService started directly")
                         } catch (e: Exception) {
-                            Log.w(TAG, "⚠️ Direct watchdog start failed: ${e.message}")
+                            Log.w(TAG, "⚠️ Direct start failed: ${e.message}")
                         }
 
                         // Try direct Flutter service start
@@ -77,7 +68,7 @@ class RestartReceiver : BroadcastReceiver() {
                             Log.w(TAG, "⚠️ Direct Flutter start failed: ${e.message}")
                         }
 
-                        // 🔥 If direct start failed (Android 12+), use WorkManager
+                        // If direct start failed (Android 12+), use WorkManager
                         if (!started) {
                             scheduleWorkManagerFallback(context)
                         }
@@ -92,9 +83,6 @@ class RestartReceiver : BroadcastReceiver() {
         }
     }
 
-    /**
-     * 🔥 NEW: WorkManager fallback with exponential backoff
-     */
     private fun scheduleWorkManagerFallback(context: Context) {
         try {
             val request = OneTimeWorkRequestBuilder<WatchdogRestartWorker>()

@@ -6,13 +6,10 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 
 /**
- * 🛡️ WatchdogRestartWorker — native WorkManager fallback
+ * 🛡️ WatchdogRestartWorker (v2 — Option B architecture)
  *
- * Used by:
- *  - BootReceiver — fallback if direct service start fails on Android 12+
- *  - RestartReceiver — fallback when FGS start throws ForegroundServiceStartNotAllowedException
- *
- * WorkManager survives Doze, app kills, and reboots (with RECEIVE_BOOT_COMPLETED).
+ * Restarts CareCircleForegroundService (was WatchdogService)
+ * Used as fallback when direct service start fails on Android 12+
  */
 class WatchdogRestartWorker(
     context: Context,
@@ -21,21 +18,23 @@ class WatchdogRestartWorker(
 
     companion object {
         private const val TAG = "WatchdogRestartWorker"
+        private const val FLUTTER_SERVICE_CLASS =
+            "id.flutter.flutter_background_service.BackgroundService"
     }
 
     override fun doWork(): Result {
         return try {
-            Log.d(TAG, "🔄 Worker executing — restarting WatchdogService")
+            Log.d(TAG, "🔄 Worker executing — restarting CareCircleForegroundService")
 
-            // Restart native watchdog
-            WatchdogService.start(applicationContext)
+            // Restart master foreground service
+            CareCircleForegroundService.start(applicationContext)
 
             // Restart Flutter BackgroundService
             try {
                 val flutterIntent = android.content.Intent().apply {
                     setClassName(
                         applicationContext,
-                        "id.flutter.flutter_background_service.BackgroundService"
+                        FLUTTER_SERVICE_CLASS
                     )
                 }
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -55,7 +54,6 @@ class WatchdogRestartWorker(
             Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "❌ Worker failed: ${e.message}")
-            // Retry with exponential backoff (10s, 20s, 40s)
             Result.retry()
         }
     }

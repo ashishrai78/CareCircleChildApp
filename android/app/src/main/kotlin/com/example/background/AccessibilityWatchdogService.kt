@@ -2,160 +2,194 @@ package com.example.background
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.PowerManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 
 /**
- * 🛡️ PRODUCTION AccessibilityWatchdogService (v3 — REALME STABLE)
+ * 🛡️ AccessibilityWatchdogService (v4 — APP BLOCKING ONLY)
+ *
+ * REFACTORED in Day 3 — Industry Standard Architecture:
+ *
+ * WHAT THIS SERVICE DOES:
+ *  ✅ App Blocking — when child opens blocked app, force-close it
+ *  ✅ Foreground app tracking (lightweight, for analytics)
+ *
+ * WHAT THIS SERVICE DOES NOT DO:
+ *  ❌ NO polling (was causing battery drain)
+ *  ❌ NO WakeLock (was triggering OEM "abnormal" detection)
+ *  ❌ NO foreground notification (CareCircleForegroundService has it)
+ *  ❌ NO service restart logic (WorkManager + RestartReceiver handles)
+ *  ❌ NO auto-launch app on revoke (was causing infinite loop)
+ *
+ * WHY THIS IS REALME-FRIENDLY:
+ *  - Real "accessibility use case" → Realme won't revoke
+ *  - Minimal resource usage → not flagged as abnormal
+ *  - Event-driven only → no suspicious background activity
+ *
+ * BLOCKED APPS DATA FLOW:
+ *  1. Parent app writes to Firestore: blocked_apps/{uid}/apps
+ *  2. CareCircleForegroundService listens + caches in SharedPreferences
+ *  3. This service reads from SharedPreferences on every app launch
  */
 class AccessibilityWatchdogService : AccessibilityService() {
 
     companion object {
-        private const val TAG = "ACCESS_WATCHDOG"
-        private const val CHANNEL_ID = "accessibility_watchdog_channel_v3"
-        private const val NOTIFICATION_ID = 1002
-        private const val INTERVAL_MS = 90_000L
-        private const val WAKE_LOCK_TAG = "CareCircle::AccessibilityWakeLock"
-        private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L
+        private const val TAG = "ACCESS_BLOCKER"
 
+        // SharedPreferences keys (shared with ForegroundService)
         private const val PREFS_NAME = "carecircle_prefs"
-        private const val KEY_LAST_FLUTTER_START = "last_flutter_start_attempt"
-        private const val FLUTTER_START_THROTTLE_MS = 5 * 60_000L
+        private const val KEY_BLOCKED_APPS = "blocked_apps_list"
+        private const val KEY_BLOCKED_APPS_UPDATED = "blocked_apps_updated_at"
 
-        private const val KEY_LAST_UNBIND_NOTIFY = "last_unbind_notify"
-        private const val UNBIND_NOTIFY_THROTTLE_MS = 10 * 60_000L
+        // Block notification
+        private const val BLOCK_NOTIF_CHANNEL_ID = "app_block_alert"
+        private const val BLOCK_NOTIF_ID = 3001
 
-        private const val FLUTTER_SERVICE_CLASS =
-            "id.flutter.flutter_background_service.BackgroundService"
+        // Last shown block notification (throttle to avoid spam)
+        private const val BLOCK_NOTIF_THROTTLE_MS = 30_000L  // 30 sec per app
 
+        /**
+         * Check if accessibility service is enabled (call from MainActivity / Flutter)
+         */
         fun isEnabled(context: Context): Boolean {
-            val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
-                    as android.view.accessibility.AccessibilityManager
-            val enabledServices = am.getEnabledAccessibilityServiceList(
-                AccessibilityServiceInfo.FEEDBACK_GENERIC
-            )
-            val serviceName = "${context.packageName}/.AccessibilityWatchdogService"
-            return enabledServices.any {
-                it.resolveInfo.serviceInfo.let { si ->
-                    "${si.packageName}/${si.name}" == serviceName
+            return try {
+                val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
+                        as android.view.accessibility.AccessibilityManager
+                val enabledServices = am.getEnabledAccessibilityServiceList(
+                    AccessibilityServiceInfo.FEEDBACK_GENERIC
+                )
+                val serviceName = "${context.packageName}/.AccessibilityWatchdogService"
+                enabledServices.any {
+                    it.resolveInfo.serviceInfo.let { si ->
+                        "${si.packageName}/${si.name}" == serviceName
+                    }
                 }
-            }
-        }
-    }
-
-    private val handler = Handler(Looper.getMainLooper())
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var lastEventReceivedAt = 0L
-    private var lastForegroundApp: String? = null
-    private var lastWakeLockRenew = 0L
-    private var eventCount = 0L
-
-    private val watchdogRunnable = object : Runnable {
-        override fun run() {
-            try {
-                val now = System.currentTimeMillis()
-
-                if (now - lastWakeLockRenew >= WAKELOCK_RENEW_INTERVAL_MS) {
-                    renewWakeLock()
-                    lastWakeLockRenew = now
-                }
-
-                if (!isWatchdogServiceRunning()) {
-                    WatchdogService.start(applicationContext)
-                    Log.d(TAG, "🔄 WatchdogService restarted")
-                }
-
-                ensureFlutterService()
-
-                if (lastEventReceivedAt > 0 && now - lastEventReceivedAt > 5 * 60_000L) {
-                    Log.w(TAG, "⚠️ No accessibility events in 5 min — OEM may be throttling (events processed: $eventCount)")
-                }
-
             } catch (e: Exception) {
-                Log.e(TAG, "Loop error: ${e.message}")
+                false
             }
+        }
 
-            handler.postDelayed(this, INTERVAL_MS)
+        /**
+         * Update blocked apps list (called by ForegroundService when Firestore updates)
+         * Stores as comma-separated string for fast access
+         */
+        fun updateBlockedApps(context: Context, apps: Set<String>) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putStringSet(KEY_BLOCKED_APPS, apps)
+                    .putLong(KEY_BLOCKED_APPS_UPDATED, System.currentTimeMillis())
+                    .apply()
+                Log.d(TAG, "✅ Blocked apps updated: ${apps.size} apps")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update blocked apps: ${e.message}")
+            }
+        }
+
+        /**
+         * Get current blocked apps list
+         */
+        fun getBlockedApps(context: Context): Set<String> {
+            return try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.getStringSet(KEY_BLOCKED_APPS, emptySet()) ?: emptySet()
+            } catch (e: Exception) {
+                emptySet()
+            }
         }
     }
+
+    // 🔥 In-memory cache of blocked apps (refreshed periodically)
+    private var blockedAppsCache: Set<String> = emptySet()
+    private var lastBlockedAppsRefresh = 0L
+    private val BLOCKED_APPS_REFRESH_INTERVAL_MS = 60_000L  // 1 min
+
+    // 🔥 Throttle per-app block notifications
+    private val lastBlockNotifTime = mutableMapOf<String, Long>()
+
+    // 🔥 Track current foreground app (avoid duplicate events)
+    private var currentForegroundApp: String? = null
+    private var eventCount = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.d(TAG, "✅ AccessibilityWatchdogService connected (v3)")
+        Log.d(TAG, "✅ AccessibilityWatchdogService connected (v4 — App Blocking Only)")
 
-        try {
-            createNotificationChannel()
-            startForeground(NOTIFICATION_ID, buildNotification())
-            Log.d(TAG, "✅ startForeground called")
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ startForeground failed: ${e.message}")
-        }
+        // 🔥 NO startForeground (AccessibilityService doesn't need it)
+        // 🔥 NO WakeLock (was causing OEM "abnormal" detection)
+        // 🔥 NO polling Handler (was causing battery drain)
 
-        try {
-            acquireWakeLock()
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock failed: ${e.message}")
-        }
-
-        handler.post(watchdogRunnable)
+        // Load initial blocked apps cache
+        refreshBlockedAppsCache()
     }
 
+    /**
+     * 🔥 MAIN FUNCTION — Process accessibility events for app blocking
+     *
+     * This is the REAL USE CASE that prevents Realme from revoking accessibility.
+     * Realme's algorithm checks: is this service actually doing accessibility work?
+     * App blocking = legitimate accessibility use → no revoke.
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
 
         try {
             val eventType = event.eventType
-            val packageName = event.packageName?.toString() ?: "unknown"
-            val now = System.currentTimeMillis()
-
-            lastEventReceivedAt = now
+            val packageName = event.packageName?.toString() ?: return
             eventCount++
 
-            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                packageName != "android" &&
-                !packageName.contains("systemui") &&
-                packageName != this.packageName) {
+            // Only process window state changes (app launch / switch)
+            if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
-                if (packageName != lastForegroundApp) {
-                    lastForegroundApp = packageName
-                    Log.d(TAG, "📋 Foreground app: $packageName (events: $eventCount)")
-                }
+            // Skip system UI and own app
+            if (packageName == "android" ||
+                packageName == "com.android.systemui" ||
+                packageName == this.packageName ||
+                packageName.contains("systemui")) {
+                return
             }
+
+            // Skip duplicate events for same app
+            if (packageName == currentForegroundApp) return
+            currentForegroundApp = packageName
+
+            Log.d(TAG, "📋 Foreground app changed: $packageName (event #$eventCount)")
+
+            // 🔥 Refresh blocked apps cache if stale (every 1 min)
+            refreshBlockedAppsCacheIfNeeded()
+
+            // 🔥 CHECK IF APP IS BLOCKED
+            if (isAppBlocked(packageName)) {
+                Log.w(TAG, "🚫 Blocked app launched: $packageName — force closing")
+                blockApp(packageName)
+            }
+
         } catch (e: Exception) {
+            // Silent fail — don't crash accessibility service
+            Log.e(TAG, "Event processing error: ${e.message}")
         }
     }
 
     override fun onInterrupt() {
         Log.w(TAG, "Accessibility service interrupted")
-        handler.removeCallbacks(watchdogRunnable)
-        releaseWakeLock()
     }
 
+    /**
+     * 🔥 Service unbound (user disabled accessibility or OEM revoked)
+     *
+     * NEW BEHAVIOR: Just notify, NO auto-launch app (prevents infinite loop)
+     */
     override fun onUnbind(intent: Intent?): Boolean {
-        Log.w(TAG, "⚠️ Accessibility service unbound — showing notification (NO auto-launch)")
+        Log.w(TAG, "⚠️ Accessibility service unbound — notifying app (NO auto-launch)")
 
-        handler.removeCallbacks(watchdogRunnable)
-        releaseWakeLock()
-        serviceScope.cancel()
-
+        // 🔥 Broadcast to Flutter (if app is open, it can show dialog)
         try {
             val broadcastIntent = Intent("com.example.background.ACCESSIBILITY_REVOKED")
             applicationContext.sendBroadcast(broadcastIntent)
@@ -164,187 +198,115 @@ class AccessibilityWatchdogService : AccessibilityService() {
             Log.e(TAG, "Broadcast failed: ${e.message}")
         }
 
-        showAccessibilityUnbindNotification()
-
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         Log.w(TAG, "❌ Accessibility service destroyed")
-        handler.removeCallbacks(watchdogRunnable)
-        serviceScope.cancel()
-        releaseWakeLock()
         super.onDestroy()
     }
 
-    private fun ensureFlutterService() {
+    // ============ App Blocking Logic ============
+
+    private fun isAppBlocked(packageName: String): Boolean {
+        return blockedAppsCache.contains(packageName)
+    }
+
+    /**
+     * Force-close blocked app + show notification
+     */
+    private fun blockApp(packageName: String) {
         try {
-            if (isFlutterServiceRunning()) return
+            // 🔥 Method 1: Go to home screen (works on all devices)
+            performGlobalAction(GLOBAL_ACTION_HOME)
 
-            val now = System.currentTimeMillis()
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val lastStart = prefs.getLong(KEY_LAST_FLUTTER_START, 0L)
+            // 🔥 Method 2: Try to use Back action (sometimes more effective)
+            // performGlobalAction(GLOBAL_ACTION_BACK)
 
-            if (now - lastStart < FLUTTER_START_THROTTLE_MS) {
-                Log.d(TAG, "Skipping Flutter service start (5-min throttle)")
-                return
-            }
-            prefs.edit().putLong(KEY_LAST_FLUTTER_START, now).apply()
+            // 🔥 Show notification (throttled per app)
+            showBlockNotification(packageName)
 
-            val intent = Intent().apply {
-                setClassName(applicationContext, FLUTTER_SERVICE_CLASS)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    startForegroundService(intent)
-                    Log.d(TAG, "🔄 Flutter service start requested")
-                } catch (e: Exception) {
-                    try { startService(intent) }
-                    catch (e2: Exception) { Log.e(TAG, "Flutter start: ${e2.message}") }
-                }
-            } else {
-                startService(intent)
-            }
+            Log.d(TAG, "✅ Blocked app force-closed: $packageName")
         } catch (e: Exception) {
-            Log.e(TAG, "Flutter service start failed: ${e.message}")
+            Log.e(TAG, "Failed to block app: ${e.message}")
         }
     }
 
-    private fun showAccessibilityUnbindNotification() {
+    /**
+     * Show notification when app is blocked (throttled per app to avoid spam)
+     */
+    private fun showBlockNotification(packageName: String) {
         try {
             val now = System.currentTimeMillis()
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val lastNotify = prefs.getLong(KEY_LAST_UNBIND_NOTIFY, 0L)
+            val lastShown = lastBlockNotifTime[packageName] ?: 0L
 
-            if (now - lastNotify < UNBIND_NOTIFY_THROTTLE_MS) {
-                Log.d(TAG, "Skipping unbind notification (10-min throttle)")
+            // Throttle: max 1 notification per app per 30 sec
+            if (now - lastShown < BLOCK_NOTIF_THROTTLE_MS) {
+                Log.d(TAG, "Skipping block notification (30s throttle) for $packageName")
                 return
             }
-            prefs.edit().putLong(KEY_LAST_UNBIND_NOTIFY, now).apply()
+            lastBlockNotifTime[packageName] = now
 
-            val notifChannelId = "accessibility_unbind_alert"
+            // Get app name
+            val appName = getAppName(packageName)
 
+            // Create notification channel
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
-                    notifChannelId,
-                    "Accessibility Alerts",
+                    BLOCK_NOTIF_CHANNEL_ID,
+                    "App Block Alerts",
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
-                    description = "Alerts when accessibility is disabled"
+                    description = "Alerts when blocked apps are opened"
                     enableVibration(true)
-                    enableLights(true)
                 }
                 val manager = getSystemService(NotificationManager::class.java)
                 manager.createNotificationChannel(channel)
             }
 
-            val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            }
-            val pendingIntent = PendingIntent.getActivity(
-                this, 2002, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(this, notifChannelId)
-                .setContentTitle("⚠️ CareCircle Protection Paused")
-                .setContentText("Accessibility disabled — tap to re-enable monitoring")
+            // Build notification
+            val notification = NotificationCompat.Builder(this, BLOCK_NOTIF_CHANNEL_ID)
+                .setContentTitle("🚫 $appName is Blocked")
+                .setContentText("Your parent has restricted access to this app")
                 .setSmallIcon(R.drawable.ic_notification)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_ERROR)
-                .setContentIntent(pendingIntent)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .setAutoCancel(true)
                 .build()
 
             val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(2002, notification)
+            manager.notify(BLOCK_NOTIF_ID, notification)
 
-            Log.d(TAG, "🔔 Accessibility unbind notification shown")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to show notification: ${e.message}")
+            Log.e(TAG, "Failed to show block notification: ${e.message}")
         }
     }
 
-    private fun isFlutterServiceRunning(): Boolean {
+    private fun getAppName(packageName: String): String {
         return try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            @Suppress("DEPRECATION")
-            val services = am.getRunningServices(Int.MAX_VALUE)
-            services.any { it.service.className == FLUTTER_SERVICE_CLASS }
+            val pm = packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(appInfo).toString()
         } catch (e: Exception) {
-            false
+            packageName
         }
     }
 
-    private fun isWatchdogServiceRunning(): Boolean {
-        return try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            @Suppress("DEPRECATION")
-            val services = am.getRunningServices(Int.MAX_VALUE)
-            services.any { it.service.className == "com.example.background.WatchdogService" }
-        } catch (e: Exception) {
-            false
-        }
+    // ============ Blocked Apps Cache Management ============
+
+    private fun refreshBlockedAppsCacheIfNeeded() {
+        val now = System.currentTimeMillis()
+        if (now - lastBlockedAppsRefresh < BLOCKED_APPS_REFRESH_INTERVAL_MS) return
+        refreshBlockedAppsCache()
     }
 
-    private fun buildNotification(): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CareCircle Running")
-            .setContentText("Background monitoring active")
-            .setSmallIcon(R.drawable.ic_notification)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "CareCircle Accessibility",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Keeps monitoring service persistent"
-                setShowBadge(false)
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
-        }
-    }
-
-    private fun acquireWakeLock() {
+    private fun refreshBlockedAppsCache() {
         try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
-            wakeLock?.setReferenceCounted(false)
-            wakeLock?.acquire()
-            Log.d(TAG, "✅ WakeLock acquired")
+            blockedAppsCache = getBlockedApps(this)
+            lastBlockedAppsRefresh = System.currentTimeMillis()
+            Log.d(TAG, "🔄 Blocked apps cache refreshed: ${blockedAppsCache.size} apps")
         } catch (e: Exception) {
-            Log.e(TAG, "WakeLock failed: ${e.message}")
-        }
-    }
-
-    private fun renewWakeLock() {
-        try {
-            wakeLock?.let {
-                if (!it.isHeld) {
-                    it.acquire()
-                    Log.d(TAG, "🔄 WakeLock re-acquired")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock renew failed: ${e.message}")
-        }
-    }
-
-    private fun releaseWakeLock() {
-        try {
-            wakeLock?.let {
-                if (it.isHeld) it.release()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock release failed: ${e.message}")
+            Log.e(TAG, "Failed to refresh blocked apps: ${e.message}")
         }
     }
 }
