@@ -63,7 +63,7 @@ class CareCircleForegroundService : Service() {
         private const val LOOP_INTERVAL_MS = 10_000L              // Main loop: 10s
         private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L  // Renew WakeLock: 4 min
         private const val HEARTBEAT_INTERVAL_MS = 3 * 60_000L     // Heartbeat: 3 min
-        private const val FULL_SYNC_INTERVAL_MS = 10 * 60_000L    // Full sync: 10 min
+        private const val FULL_SYNC_INTERVAL_MS = 30 * 60_000L    // Full sync: 30 min
         private const val SYNC_REQUEST_CHECK_MS = 10_000L          // 🔥 10 sec — was 2 min (parent wants instant response)
         private const val APPS_SYNC_INTERVAL_MS = 6 * 60 * 60_000L  // Installed apps: 6 hours
 
