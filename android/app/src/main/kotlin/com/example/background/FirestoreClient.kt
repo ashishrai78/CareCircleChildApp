@@ -22,8 +22,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 object FirestoreClient {
 
     private const val TAG = "FirestoreClient"
-    private const val TIMEOUT_MS = 5_000L
-    private const val MAX_RETRIES = 1
+    private const val TIMEOUT_MS = 15_000L
+    private const val MAX_RETRIES = 2
 
     // 🔥 Per-operation throttle (30s per operation type)
     private val PER_OP_THROTTLE_MS = 30_000L

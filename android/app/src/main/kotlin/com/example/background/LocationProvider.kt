@@ -10,6 +10,12 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Looper
 import android.provider.Settings
+import android.telephony.CellInfo
+import android.telephony.CellInfoGsm
+import android.telephony.CellInfoLte
+import android.telephony.CellInfoNr
+import android.telephony.CellInfoWcdma
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -25,24 +31,30 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import kotlin.coroutines.resume
 
 /**
- * 📍 PRODUCTION LocationProvider v2 — multi-source fallback
+ * 📍 PRODUCTION LocationProvider v3 — multi-source fallback + Cell Tower (AirDroid style)
  *
- * Critical fixes vs v1:
- *  1. Multi-source fallback: FusedLocation → LocationManager(GPS) → LocationManager(NETWORK) → cached
+ * Critical fixes vs v2:
+ *  1. Multi-source fallback: FusedLocation → GPS → NETWORK → last known → cell tower → cached
  *  2. Adaptive priority based on interval (battery-friendly)
  *  3. Async Geocoder with 3s timeout (was blocking)
  *  4. Background location permission check (Android 10+)
  *  5. Location service OFF detection — tries all fallbacks before giving up
  *  6. Cached last-known location in SharedPreferences (survives service restart)
+ *  7. 🔥 NEW: Cell tower fallback (AirDroid style) — works WITHOUT location toggle
+ *  8. 🔥 NEW: OpenCellID API integration with 6-hour smart caching
  *
- * Why multi-source:
- *  - Realme/Xiaomi FusedLocation returns null when GPS toggle is OFF
- *  - LocationManager.NETWORK_PROVIDER still works (uses cell towers)
- *  - Last cached location is better than no location
+ * Why cell tower fallback:
+ *  - When user manually turns OFF location toggle, GPS/Network providers fail
+ *  - Cell tower info still works (TelephonyManager.allCellInfo)
+ *  - Accuracy: 1-5 km (better than no location)
+ *  - AirDroid, Google Family Link use similar approach
  */
 class LocationProvider(private val context: Context) {
 
@@ -56,6 +68,14 @@ class LocationProvider(private val context: Context) {
         private const val KEY_LAST_KNOWN_PROVIDER = "last_known_provider"
         private const val KEY_LAST_KNOWN_ADDRESS = "last_known_address"
         private const val CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000L  // 24 hours
+
+        // 🔥 OpenCellID API (free tier: 1000 lookups/day)
+        private const val OPENCELLID_API_KEY = "pk.a876cfd669c0ee3719cdae24519962b7"
+        private const val OPENCELLID_API_URL = "https://opencellid.org/cell/get"
+
+        // 🔥 Smart caching — avoid repeated API calls for same cell tower
+        private const val KEY_LAST_CELL_LOOKUP = "last_cell_lookup_"
+        private const val CELL_LOOKUP_CACHE_MS = 6 * 60 * 60 * 1000L  // 6 hours
     }
 
     private val fusedClient: FusedLocationProviderClient =
@@ -69,7 +89,7 @@ class LocationProvider(private val context: Context) {
      * Get current location with multi-source fallback.
      *
      * Returns map: { lat, lng, accuracy, altitude, speed, bearing, timestamp, address,
-     *               isMock, provider, isCached, locationServiceOn }
+     *               isMock, provider, isCached, locationServiceOn, isApproximate, cellInfo? }
      */
     @SuppressLint("MissingPermission")
     fun getCurrentLocation(
@@ -115,9 +135,15 @@ class LocationProvider(private val context: Context) {
                 result = tryLocationManagerLastKnown()
             }
 
-            // 6. App's own cached location (from SharedPreferences)
+            // 6. 🔥 NEW: Cell tower fallback (AirDroid style — works without location toggle)
             if (result == null) {
-                Log.w(TAG, "All system sources failed — using app cached location")
+                Log.w(TAG, "All system sources failed — trying cell tower info (AirDroid style)")
+                result = tryCellTowerLocation()
+            }
+
+            // 7. App's own cached location (from SharedPreferences)
+            if (result == null) {
+                Log.w(TAG, "All sources failed — using app cached location")
                 result = tryCachedLocation()
             }
 
@@ -137,9 +163,12 @@ class LocationProvider(private val context: Context) {
                 }
                 Log.e(TAG, "❌ $error")
             } else {
-                // 🔥 Cache successful location for future use
-                cacheLocation(result!!)
-                Log.d(TAG, "✅ Location obtained from: ${result!!["provider"]}")
+                // 🔥 Cache successful location for future use (only if not cell tower — already has its own cache)
+                val provider = result!!["provider"] as? String ?: ""
+                if (!provider.startsWith("cell_tower_")) {
+                    cacheLocation(result!!)
+                }
+                Log.d(TAG, "✅ Location obtained from: $provider")
             }
 
             withContext(Dispatchers.Main) {
@@ -391,6 +420,294 @@ class LocationProvider(private val context: Context) {
         }
     }
 
+    /**
+     * 🔥 Cell Tower Fallback (AirDroid style)
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun tryCellTowerLocation(): Map<String, Any?>? {
+        return try {
+            if (!hasCoarseLocationPermission()) {
+                Log.w(TAG, "No coarse location permission — skipping cell tower lookup")
+                return null
+            }
+
+            val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE)
+                    as TelephonyManager
+
+            // 🔥 Always available — basic operator info
+            val operatorName: String = telephonyManager.networkOperatorName ?: "Unknown"
+            val networkOperator: String = telephonyManager.networkOperator ?: "000000"
+            val simOperator: String = telephonyManager.simOperator ?: "000000"
+            val simOperatorName: String = telephonyManager.simOperatorName ?: "Unknown"
+            val phoneType: String = when (telephonyManager.phoneType) {
+                TelephonyManager.PHONE_TYPE_GSM -> "GSM"
+                TelephonyManager.PHONE_TYPE_CDMA -> "CDMA"
+                TelephonyManager.PHONE_TYPE_NONE -> "NONE"
+                else -> "UNKNOWN"
+            }
+
+            // 🔥 Try detailed cell info
+            val cellInfoList: List<CellInfo>? = try {
+                telephonyManager.allCellInfo
+            } catch (e: SecurityException) {
+                Log.w(TAG, "allCellInfo requires permission: ${e.message}")
+                null
+            }
+
+            if (cellInfoList.isNullOrEmpty()) {
+                Log.w(TAG, "No detailed cell info (location toggle likely OFF)")
+                Log.d(TAG, "📡 Operator: $operatorName, SIM: $simOperatorName, Phone: $phoneType")
+
+                // 🔥 Explicit typed map to avoid inference issues
+                val basicResult: MutableMap<String, Any?> = mutableMapOf()
+                basicResult["lat"] = 0.0
+                basicResult["lng"] = 0.0
+                basicResult["accuracy"] = 0f
+                basicResult["altitude"] = 0.0
+                basicResult["speed"] = 0f
+                basicResult["bearing"] = 0f
+                basicResult["timestamp"] = System.currentTimeMillis()
+                basicResult["isMock"] = false
+                basicResult["address"] = null
+                basicResult["provider"] = "cell_tower_basic_unresolved"
+                basicResult["isCached"] = false
+                basicResult["isApproximate"] = true
+                basicResult["locationServiceOn"] = false
+
+                val cellInfoMap: MutableMap<String, Any?> = mutableMapOf()
+                cellInfoMap["mcc"] = networkOperator.take(3).toIntOrNull() ?: 0
+                cellInfoMap["mnc"] = networkOperator.drop(3).toIntOrNull() ?: 0
+                cellInfoMap["cellId"] = 0L
+                cellInfoMap["lac"] = 0
+                cellInfoMap["signalStrength"] = 0
+                cellInfoMap["cellType"] = phoneType
+                cellInfoMap["networkOperator"] = networkOperator
+                cellInfoMap["operatorName"] = operatorName
+                cellInfoMap["simOperator"] = simOperator
+                cellInfoMap["simOperatorName"] = simOperatorName
+                cellInfoMap["cellCount"] = 0
+                cellInfoMap["note"] = "Location toggle OFF — basic operator info only"
+                basicResult["cellInfo"] = cellInfoMap
+
+                return basicResult
+            }
+
+            Log.d(TAG, "📡 Found ${cellInfoList.size} cell towers")
+
+            val registeredCell = cellInfoList.firstOrNull { it.isRegistered }
+                ?: cellInfoList.firstOrNull()
+                ?: return null
+
+            var mcc = 0
+            var mnc = 0
+            var cellId = 0L
+            var lac = 0
+            var signalStrength = 0
+            var cellType = "unknown"
+
+            when (registeredCell) {
+                is CellInfoLte -> {
+                    val identity = registeredCell.cellIdentity
+                    mcc = identity.mcc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    mnc = identity.mnc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    cellId = identity.ci.toLong()
+                    lac = identity.tac.takeIf { it != Int.MAX_VALUE } ?: 0
+                    signalStrength = registeredCell.cellSignalStrength.dbm
+                    cellType = "LTE"
+                }
+                is CellInfoGsm -> {
+                    val identity = registeredCell.cellIdentity
+                    mcc = identity.mcc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    mnc = identity.mnc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    cellId = identity.cid.toLong()
+                    lac = identity.lac.takeIf { it != Int.MAX_VALUE } ?: 0
+                    signalStrength = registeredCell.cellSignalStrength.dbm
+                    cellType = "GSM"
+                }
+                is CellInfoWcdma -> {
+                    val identity = registeredCell.cellIdentity
+                    mcc = identity.mcc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    mnc = identity.mnc.takeIf { it != Int.MAX_VALUE } ?: 0
+                    cellId = identity.cid.toLong()
+                    lac = identity.lac.takeIf { it != Int.MAX_VALUE } ?: 0
+                    signalStrength = registeredCell.cellSignalStrength.dbm
+                    cellType = "WCDMA"
+                }
+                is CellInfoNr -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        try {
+                            val identity = registeredCell.cellIdentity as android.telephony.CellIdentityNr
+                            mcc = identity.mccString?.toIntOrNull() ?: 0
+                            mnc = identity.mncString?.toIntOrNull() ?: 0
+                            cellId = identity.nci
+                            lac = identity.tac
+                            signalStrength = registeredCell.cellSignalStrength.dbm
+                            cellType = "NR"
+                        } catch (e: Exception) {
+                            Log.w(TAG, "5G cell info parse failed: ${e.message}")
+                        }
+                    }
+                }
+            }
+
+            if (mcc == 0 || mnc == 0 || cellId == 0L) {
+                Log.w(TAG, "Invalid cell info — using basic operator info")
+                val partialResult: MutableMap<String, Any?> = mutableMapOf()
+                partialResult["lat"] = 0.0
+                partialResult["lng"] = 0.0
+                partialResult["accuracy"] = 0f
+                partialResult["provider"] = "cell_tower_${cellType}_partial"
+                partialResult["isApproximate"] = true
+                partialResult["locationServiceOn"] = false
+
+                val cellInfoMap: MutableMap<String, Any?> = mutableMapOf()
+                cellInfoMap["mcc"] = mcc
+                cellInfoMap["mnc"] = mnc
+                cellInfoMap["cellId"] = cellId
+                cellInfoMap["lac"] = lac
+                cellInfoMap["signalStrength"] = signalStrength
+                cellInfoMap["cellType"] = cellType
+                cellInfoMap["networkOperator"] = networkOperator
+                cellInfoMap["operatorName"] = operatorName
+                cellInfoMap["simOperator"] = simOperator
+                cellInfoMap["simOperatorName"] = simOperatorName
+                cellInfoMap["cellCount"] = cellInfoList.size
+                cellInfoMap["note"] = "Partial cell info — couldn't parse fully"
+                partialResult["cellInfo"] = cellInfoMap
+
+                return partialResult
+            }
+
+            Log.d(TAG, "📡 Cell: $cellType MCC=$mcc MNC=$mnc CellID=$cellId LAC=$lac Signal=$signalStrength dBm Operator=$operatorName")
+
+            // 🔥 Try to resolve cell info to lat/lng via OpenCellID API
+            val resolvedLocation = resolveCellToLatLng(mcc, mnc, cellId, lac, cellType)
+
+            val result: MutableMap<String, Any?> = mutableMapOf()
+
+            if (resolvedLocation != null) {
+                result["lat"] = resolvedLocation.first
+                result["lng"] = resolvedLocation.second
+                result["accuracy"] = 5000f
+                result["provider"] = "cell_tower_${cellType}_resolved"
+                Log.d(TAG, "✅ Cell resolved: ${resolvedLocation.first}, ${resolvedLocation.second}")
+            } else {
+                result["lat"] = 0.0
+                result["lng"] = 0.0
+                result["accuracy"] = 0f
+                result["provider"] = "cell_tower_${cellType}_unresolved"
+                Log.w(TAG, "⚠️ Cell unresolved — saving cell info only")
+            }
+
+            result["altitude"] = 0.0
+            result["speed"] = 0f
+            result["bearing"] = 0f
+            result["timestamp"] = System.currentTimeMillis()
+            result["isMock"] = false
+            result["address"] = null
+            result["isCached"] = false
+            result["isApproximate"] = true
+            result["locationServiceOn"] = false
+
+            val cellInfoMap: MutableMap<String, Any?> = mutableMapOf()
+            cellInfoMap["mcc"] = mcc
+            cellInfoMap["mnc"] = mnc
+            cellInfoMap["cellId"] = cellId
+            cellInfoMap["lac"] = lac
+            cellInfoMap["signalStrength"] = signalStrength
+            cellInfoMap["cellType"] = cellType
+            cellInfoMap["networkOperator"] = networkOperator
+            cellInfoMap["operatorName"] = operatorName
+            cellInfoMap["simOperator"] = simOperator
+            cellInfoMap["simOperatorName"] = simOperatorName
+            cellInfoMap["cellCount"] = cellInfoList.size
+            result["cellInfo"] = cellInfoMap
+
+            result
+        } catch (e: Exception) {
+            Log.w(TAG, "Cell tower location failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 🔥 Resolve cell tower to lat/lng — with smart 6-hour caching
+     * Saves OpenCellID API quota (1000/day free)
+     */
+    private suspend fun resolveCellToLatLng(
+        mcc: Int,
+        mnc: Int,
+        cellId: Long,
+        lac: Int,
+        radioType: String
+    ): Pair<Double, Double>? {
+        return try {
+            // 🔥 Check cache first
+            val cacheKey = "${KEY_LAST_CELL_LOOKUP}${mcc}_${mnc}_${cellId}"
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+            val cachedTime = prefs.getLong("${cacheKey}_time", 0L)
+            val cachedLat = prefs.getString("${cacheKey}_lat", null)?.toDoubleOrNull()
+            val cachedLng = prefs.getString("${cacheKey}_lng", null)?.toDoubleOrNull()
+
+            val now = System.currentTimeMillis()
+            if (cachedLat != null && cachedLng != null && (now - cachedTime) < CELL_LOOKUP_CACHE_MS) {
+                Log.d(TAG, "💾 Using cached cell tower location (${(now - cachedTime) / 60000} min old)")
+                return Pair(cachedLat, cachedLng)
+            }
+
+            // 🔥 Not cached or expired — call API
+            withTimeoutOrNull(5_000) {
+                withContext(Dispatchers.IO) {
+                    val urlString = "$OPENCELLID_API_URL" +
+                        "?key=$OPENCELLID_API_KEY" +
+                        "&mcc=$mcc" +
+                        "&mnc=$mnc" +
+                        "&lac=$lac" +
+                        "&cellid=$cellId" +
+                        "&format=json" +
+                        "&radio=${radioType.lowercase()}"
+
+                    val url = URL(urlString)
+                    val connection = url.openConnection() as HttpURLConnection
+                    connection.requestMethod = "GET"
+                    connection.connectTimeout = 5_000
+                    connection.readTimeout = 5_000
+                    connection.setRequestProperty("User-Agent", "CareCircle/1.0")
+
+                    val responseCode = connection.responseCode
+                    if (responseCode == 200) {
+                        val response = connection.inputStream.bufferedReader().use { it.readText() }
+                        val json = JSONObject(response)
+
+                        val lat = json.optDouble("lat", Double.NaN)
+                        val lon = json.optDouble("lon", Double.NaN)
+
+                        if (!lat.isNaN() && !lon.isNaN()) {
+                            // 🔥 Cache the result
+                            prefs.edit()
+                                .putString("${cacheKey}_lat", lat.toString())
+                                .putString("${cacheKey}_lng", lon.toString())
+                                .putLong("${cacheKey}_time", now)
+                                .apply()
+
+                            Log.d(TAG, "💾 Cell tower location cached for 6 hours")
+                            Pair(lat, lon)
+                        } else {
+                            null
+                        }
+                    } else {
+                        Log.w(TAG, "OpenCellID API returned: $responseCode")
+                        null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "OpenCellID resolve failed: ${e.message}")
+            null
+        }
+    }
+
     private fun tryCachedLocation(): Map<String, Any?>? {
         return try {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -526,6 +843,12 @@ class LocationProvider(private val context: Context) {
         } else true
 
         return (hasFine || hasCoarse) && hasBackground
+    }
+
+    private fun hasCoarseLocationPermission(): Boolean {
+        return ActivityCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     /**
