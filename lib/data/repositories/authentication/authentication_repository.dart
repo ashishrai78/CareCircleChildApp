@@ -1,6 +1,6 @@
-
 import 'package:background/features/childsetup/screens/permission_setup_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:get_storage/get_storage.dart';
@@ -21,43 +21,85 @@ class AuthenticationRepository extends GetxController {
   final _auth = FirebaseAuth.instance;
   User? get currentUser => _auth.currentUser;
 
+  // 🔥 Track if we've already redirected (prevents multiple redirects)
+  bool _hasRedirected = false;
+
   @override
   void onReady() {
-    screenRedirect();
+    super.onReady();
+    _initAuthListener();
+  }
+
+  /// 🔥 FIX: Listen to authStateChanges() — handles Firebase auth state restoration delay
+  void _initAuthListener() {
+    // Listen for auth state changes (fires on app launch too, after Firebase restores session)
+    _auth.authStateChanges().listen((User? user) {
+      if (_hasRedirected) return;
+
+      if (user != null) {
+        // 🔥 Wait a bit to ensure Firebase has fully restored state
+        Future.delayed(const Duration(milliseconds: 500), () {
+          screenRedirect();
+        });
+      } else {
+        // No user — check first time
+        _checkFirstTime();
+        _hasRedirected = true;
+      }
+    }, onError: (error) {
+      debugPrint("🔥 Auth state error: $error");
+      _checkFirstTime();
+      _hasRedirected = true;
+    });
+  }
+
+  /// Check if first time user → show onboarding, else login
+  void _checkFirstTime() {
+    storage.writeIfNull('isFirstTime', true);
+    if (storage.read('isFirstTime') == true) {
+      Get.offAll(() => OnboardingScreen());
+    } else {
+      Get.offAll(() => LoginScreen());
+    }
+  }
+
+  /// 🔥 FIX: Reset redirect flag on logout so next login works
+  void _resetRedirectFlag() {
+    _hasRedirected = false;
   }
 
   // function to redirect to right Screen
   void screenRedirect() async {
-    if (currentUser != null) {
-      // After successful login:
-      if (currentUser != null) {
-        await GetStorage().write('currentUserId', currentUser!.uid);
-        // 🔥 Pass to native
-        try {
-          const platform = MethodChannel('watchdog_channel');
-          await platform.invokeMethod('setUserId', {'uid': currentUser!.uid});
-        } catch (e) {
-          print("Failed to pass UID to native: $e");
-        }
-      }
-      if (currentUser!.emailVerified) {
-        // If verify, go to navigation menu
-        await UserRepository.instance.generateChildCode(currentUser!.uid);
-        //storage.write('isGenerateCode', true);
-        Get.offAll(() => PermissionSetupScreen());
-
-      } else {
-        // If not verify, go to verifyEmailScreen
-        Get.offAll(
-          () => VerifyEmailScreen(userEmail: _auth.currentUser!.email),
-        );
-      }
-    } else {
-      storage.writeIfNull('isFirstTime', true);
-      storage.read('isFirstTime') != true
-          ? Get.offAll(() => LoginScreen())
-          : Get.offAll(() => OnboardingScreen());
+    final user = _auth.currentUser;
+    if (user == null) {
+      _checkFirstTime();
+      _hasRedirected = true;
+      return;
     }
+
+    // 🔥 Write UID to storage + pass to native
+    await GetStorage().write('currentUserId', user.uid);
+    try {
+      const platform = MethodChannel('watchdog_channel');
+      await platform.invokeMethod('setUserId', {'uid': user.uid});
+      debugPrint("✅ UID passed to native: ${user.uid}");
+    } catch (e) {
+      debugPrint("Failed to pass UID to native: $e");
+    }
+
+    if (user.emailVerified) {
+      // Verified → go to PermissionSetupScreen
+      try {
+        await UserRepository.instance.generateChildCode(user.uid);
+      } catch (e) {
+        debugPrint("generateChildCode failed: $e");
+      }
+      Get.offAll(() => PermissionSetupScreen());
+    } else {
+      // Not verified → verify email screen
+      Get.offAll(() => VerifyEmailScreen(userEmail: user.email ?? ''));
+    }
+    _hasRedirected = true;
   }
 
   // UserRegister with Email/ Password
@@ -86,6 +128,8 @@ class AuthenticationRepository extends GetxController {
         email: email,
         password: password,
       );
+      // 🔥 FIX: Reset redirect flag after login
+      _resetRedirectFlag();
       return userCredential;
     } on FirebaseAuthException catch (e) {
       throw UFirebaseAuthException(e.code).message;
@@ -103,21 +147,20 @@ class AuthenticationRepository extends GetxController {
   // Authentication with Google Account
   Future<UserCredential> signInWithGoogle() async {
     try {
-      // Show all Accounts of in your phone
       final GoogleSignInAccount? googleAccount = await GoogleSignIn().signIn();
       final GoogleSignInAuthentication? googleAuth =
-          await googleAccount?.authentication;
+      await googleAccount?.authentication;
 
-      // create credentials
       final OAuthCredential credential = GoogleAuthProvider.credential(
         idToken: googleAuth?.idToken,
         accessToken: googleAuth?.accessToken,
       );
 
-      // Sign in using credentials
       UserCredential userCredential = await _auth.signInWithCredential(
         credential,
       );
+      // 🔥 FIX: Reset redirect flag after Google login
+      _resetRedirectFlag();
       return userCredential;
     } on FirebaseAuthException catch (e) {
       throw UFirebaseAuthException(e.code).message;
@@ -171,6 +214,10 @@ class AuthenticationRepository extends GetxController {
     try {
       await _auth.signOut();
       await GoogleSignIn().signOut();
+      // 🔥 FIX: Clear stored UID + reset redirect flag
+      await GetStorage().remove('currentUserId');
+      await GetStorage().remove('lastNotifiedUidToNative');
+      _resetRedirectFlag();
       Get.offAll(() => LoginScreen());
     } on FirebaseAuthException catch (e) {
       throw UFirebaseAuthException(e.code).message;
@@ -205,6 +252,7 @@ class AuthenticationRepository extends GetxController {
       throw 'Something went wrong! Please try again';
     }
   }
+}
 
   // Delete User Account
   /* Future<void> deleteUserAccount() async{
@@ -229,4 +277,4 @@ class AuthenticationRepository extends GetxController {
       throw 'Something went wrong! Please try again';
     }
   }*/
-}
+

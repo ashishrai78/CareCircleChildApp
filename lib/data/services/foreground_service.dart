@@ -13,12 +13,12 @@ import '../services/webrtc_config.dart';
 /// Responsibilities:
 ///  - Listen for sync_mic commands from parent
 ///  - Start/stop WebRTCAudioSender based on command
-///  - Restore WebRTC session after service restart (uses persisted state)
+///  - Restore WebRTC session after service restart
+///  - 🔥 Auto-retry listener setup if UID not available yet
 ///
 /// Architecture:
 ///  - Data collection (location/battery/usage) handled NATIVELY by
-///    WatchdogService.kt → NativeDataCollector.kt → FirestoreClient.kt
-///    (because MethodChannels aren't available in background isolate)
+///    CareCircleForegroundService → NativeDataCollector → FirestoreClient
 ///  - WebRTC handled here in Flutter because flutter_webrtc plugin
 ///    works in background service isolate
 @pragma('vm:entry-point')
@@ -36,7 +36,6 @@ void onStart(ServiceInstance service) async {
   final storage = GetStorage();
 
   // Restore WebRTC state from previous service instance
-  // (in case service was killed and restarted by WatchdogService)
   bool webrtcRunning = storage.read<bool>('webrtc_running') ?? false;
   String? lastCallId = storage.read<String>('webrtc_call_id');
 
@@ -73,15 +72,26 @@ void onStart(ServiceInstance service) async {
 
   // ============ FIRESTORE SNAPSHOT LISTENER (for sync_mic commands) ============
   StreamSubscription<DocumentSnapshot>? controlSub;
+  Timer? retryTimer;
 
   Future<void> setupControlListener() async {
     final docId = storage.read<String>('currentUserId');
     if (docId == null) {
-      debugPrint('⚠️ currentUserId missing — will retry when user logs in');
-      // 🔥 FIX: No infinite timer — just exit. setupControlListener will be called
-      // again when AuthenticationRepository sets the UID (via storage listener)
+      debugPrint('⚠️ currentUserId missing — will retry in 15s');
+      // 🔥 FIX: Retry every 15s until UID becomes available
+      retryTimer?.cancel();
+      retryTimer = Timer(const Duration(seconds: 15), () {
+        setupControlListener();
+      });
       return;
     }
+
+    // 🔥 Cancel any existing retry timer
+    retryTimer?.cancel();
+    retryTimer = null;
+
+    // 🔥 Cancel existing listener if any (UID may have changed)
+    await controlSub?.cancel();
 
     debugPrint('📡 Setting up sync_mic listener for child $docId');
 
@@ -90,7 +100,7 @@ void onStart(ServiceInstance service) async {
         .doc(docId)
         .snapshots()
         .listen(
-      (snapshot) async {
+          (snapshot) async {
         if (!snapshot.exists) return;
 
         final data = snapshot.data() as Map<String, dynamic>?;
@@ -108,19 +118,34 @@ void onStart(ServiceInstance service) async {
       onError: (e) {
         debugPrint('🔥 Snapshot listener error: $e');
         // Auto-restart listener after 30s
-        Timer(const Duration(seconds: 30), () {
-          controlSub?.cancel();
+        retryTimer?.cancel();
+        retryTimer = Timer(const Duration(seconds: 30), () {
           setupControlListener();
         });
       },
     );
   }
 
+  // 🔥 Initial setup attempt
   await setupControlListener();
+
+  // 🔥 Watch for UID changes — re-setup listener when user logs in/out
+  // GetStorage doesn't have native change stream, so we poll every 10s
+  String? lastKnownUid = storage.read<String>('currentUserId');
+  Timer.periodic(const Duration(seconds: 10), (timer) {
+    final currentUid = storage.read<String>('currentUserId');
+    if (currentUid != lastKnownUid) {
+      debugPrint('🔄 UID changed in storage: $lastKnownUid → $currentUid');
+      lastKnownUid = currentUid;
+      // Re-setup listener with new UID
+      setupControlListener();
+    }
+  });
 
   // Cleanup on service stop event
   service.on('stop').listen((event) async {
     debugPrint('🛑 Service stop event');
+    retryTimer?.cancel();
     await controlSub?.cancel();
     if (webrtcRunning) {
       await webrtc.stop();
