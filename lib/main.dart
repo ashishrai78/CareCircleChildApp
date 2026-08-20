@@ -39,7 +39,7 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
   // Initialize accessibility event stream
-  //_accessibilityEventController = StreamController<String>.broadcast();
+  _accessibilityEventController = StreamController<String>.broadcast();
 
   try {
     await GetStorage.init();
@@ -49,9 +49,7 @@ Future<void> main() async {
   }
 
   try {
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-    );
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     Get.put(AuthenticationRepository());
     debugPrint("✅ Firebase initialized");
   } catch (e) {

@@ -70,7 +70,7 @@ class AuthenticationRepository extends GetxController {
 
   // function to redirect to right Screen
   void screenRedirect() async {
-    final user = _auth.currentUser;
+    final user = currentUser;
     if (user == null) {
       _checkFirstTime();
       _hasRedirected = true;
@@ -78,7 +78,7 @@ class AuthenticationRepository extends GetxController {
     }
 
     // 🔥 Write UID to storage + pass to native
-    await GetStorage().write('currentUserId', user.uid);
+    await storage.write('currentUserId', user.uid);
     try {
       const platform = MethodChannel('watchdog_channel');
       await platform.invokeMethod('setUserId', {'uid': user.uid});
@@ -215,8 +215,8 @@ class AuthenticationRepository extends GetxController {
       await _auth.signOut();
       await GoogleSignIn().signOut();
       // 🔥 FIX: Clear stored UID + reset redirect flag
-      await GetStorage().remove('currentUserId');
-      await GetStorage().remove('lastNotifiedUidToNative');
+      await storage.remove('currentUserId');
+      await storage.remove('lastNotifiedUidToNative');
       _resetRedirectFlag();
       Get.offAll(() => LoginScreen());
     } on FirebaseAuthException catch (e) {

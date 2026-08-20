@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -75,12 +76,15 @@ void onStart(ServiceInstance service) async {
   Timer? retryTimer;
 
   Future<void> setupControlListener() async {
-    final docId = storage.read<String>('currentUserId');
+    final docId = GetStorage().read('currentUserId');
+    print('CurrentUserId=============$docId');
     if (docId == null) {
-      debugPrint('⚠️ currentUserId missing — will retry in 15s');
-      // 🔥 FIX: Retry every 15s until UID becomes available
+      debugPrint('⚠️ currentUserId missing — will retry in 5s');
+      // 🔥 FIX: Retry every 5s until UID becomes available
+      final currentUserId = FirebaseAuth.instance.currentUser!.uid.toString();
+      await storage.write('currentUserId', currentUserId);
       retryTimer?.cancel();
-      retryTimer = Timer(const Duration(seconds: 15), () {
+      retryTimer = Timer(const Duration(seconds: 5), () {
         setupControlListener();
       });
       return;
