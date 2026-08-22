@@ -30,8 +30,7 @@ FlutterLocalNotificationsPlugin();
 
 // Global accessibility event stream (listened by MyApp)
 StreamController<String>? _accessibilityEventController;
-Stream<String> get accessibilityEvents =>
-    _accessibilityEventController?.stream ?? const Stream.empty();
+Stream<String> get accessibilityEvents => _accessibilityEventController?.stream ?? const Stream.empty();
 
 Future<void> main() async {
   // 1. Binding
