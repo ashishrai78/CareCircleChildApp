@@ -2,6 +2,7 @@ import 'package:background/features/childsetup/screens/permission_setup_screen.d
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:get/get.dart';
 import 'package:get_storage/get_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -80,6 +81,8 @@ class AuthenticationRepository extends GetxController {
     // 🔥 Write UID to storage + pass to native
     await storage.write('currentUserId', user.uid);
     try {
+      final service = FlutterBackgroundService();
+      service.invoke('setUserId', {'uid': user.uid,},);
       const platform = MethodChannel('watchdog_channel');
       await platform.invokeMethod('setUserId', {'uid': user.uid});
       debugPrint("✅ UID passed to native: ${user.uid}");
