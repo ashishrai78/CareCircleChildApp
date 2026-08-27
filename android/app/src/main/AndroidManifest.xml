@@ -53,6 +53,19 @@
     <!-- ============ FOREGROUND LAUNCH (Android 14+) ============ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
+    <!-- ============ CONTACTS ============ -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <!-- ============ CALL DETECTION ============ -->
+    <!-- 🔥 READ_PHONE_STATE: Detects call state changes (RINGING/OFFHOOK/IDLE) -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- 🔥 READ_CALL_LOG: Direct call log access (Android 9 and below only) -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- 🔥 PROCESS_OUTGOING_CALLS: Detect outgoing calls -->
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" tools:ignore="ProtectedPermissions" />
+
+
+
     <application
         android:label="CareCircle"
         android:name="${applicationName}"
@@ -140,6 +153,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- ============ CALL DETECTOR SERVICE (real-time call tracking) ============ -->
+        <service
+            android:name=".CallDetectorService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+
 
         <!-- ============ BOOT RECEIVER ============ -->
         <receiver

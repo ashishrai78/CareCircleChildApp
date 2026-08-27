@@ -39,7 +39,9 @@ class MainActivity : FlutterActivity() {
     private lateinit var permissionsChannel: MethodChannel
     private lateinit var accessibilityEventChannel: EventChannel
     private lateinit var deviceAdminChannel: MethodChannel
-    private lateinit var appBlockerChannel: MethodChannel  // 🔥 NEW
+    private lateinit var appBlockerChannel: MethodChannel
+    private lateinit var contactsChannel: MethodChannel
+    private lateinit var callLogChannel: MethodChannel
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -61,7 +63,9 @@ class MainActivity : FlutterActivity() {
         setupPermissionsChannel(flutterEngine)
         setupAccessibilityEventChannel(flutterEngine)
         setupDeviceAdminChannel(flutterEngine)
-        setupAppBlockerChannel(flutterEngine)  // 🔥 NEW
+        setupAppBlockerChannel(flutterEngine)
+        setupContactsChannel(flutterEngine)
+        setupCallLogChannel(flutterEngine)
 
         registerAccessibilityRevokedReceiver()
 
@@ -518,6 +522,118 @@ class MainActivity : FlutterActivity() {
             registerReceiver(receiver, filter)
         }
     }
+
+    // ============ CONTACTS CHANNEL ============
+    private fun setupContactsChannel(flutterEngine: FlutterEngine) {
+        contactsChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "contacts_channel"
+        )
+
+        val contactsProvider = ContactsProvider(this)
+
+        contactsChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "hasContactsPermission" -> {
+                    result.success(contactsProvider.hasPermission())
+                }
+                "openContactsSettings" -> {
+                    val success = tryStartActivity(
+                        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = android.net.Uri.fromParts("package", packageName, null)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
+                }
+                "getAllContacts" -> {
+                    val includePhotos = call.argument<Boolean>("includePhotos") ?: true
+                    ioScope.launch {
+                        val contacts = contactsProvider.getAllContacts(includePhotos)
+                        withContext(Dispatchers.Main) { result.success(contacts) }
+                    }
+                }
+                "getContactCount" -> {
+                    ioScope.launch {
+                        val count = contactsProvider.getContactCount()
+                        withContext(Dispatchers.Main) { result.success(count) }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    // ============ CALL LOG CHANNEL ============
+    private fun setupCallLogChannel(flutterEngine: FlutterEngine) {
+        callLogChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "call_log_channel"
+        )
+
+        val callLogProvider = CallLogProvider(this)
+
+        callLogChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "hasCallLogPermission" -> {
+                    result.success(callLogProvider.hasPermission())
+                }
+                "isDirectAccessAvailable" -> {
+                    result.success(callLogProvider.isDirectAccessAvailable())
+                }
+                "openCallLogSettings" -> {
+                    val success = tryStartActivity(
+                        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = android.net.Uri.fromParts("package", packageName, null)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                    result.success(success)
+                }
+                "getCallHistory" -> {
+                    val max = call.argument<Int>("maxResults") ?: 100
+                    ioScope.launch {
+                        val history = callLogProvider.getCallHistory(max)
+                        withContext(Dispatchers.Main) { result.success(history) }
+                    }
+                }
+                "getTodayCallStats" -> {
+                    ioScope.launch {
+                        val stats = callLogProvider.getTodayCallStats()
+                        withContext(Dispatchers.Main) { result.success(stats) }
+                    }
+                }
+                "startCallDetection" -> {
+                    CallDetectorService.start(this)
+                    result.success(true)
+                }
+                "stopCallDetection" -> {
+                    CallDetectorService.stop(this)
+                    result.success(true)
+                }
+                "setCallMonitoringEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    getSharedPreferences("carecircle_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("call_monitoring_enabled", enabled)
+                        .apply()
+
+                    if (enabled) {
+                        CallDetectorService.start(this)
+                    } else {
+                        CallDetectorService.stop(this)
+                    }
+
+                    Log.d(TAG, "📞 Call monitoring ${if (enabled) "enabled" else "disabled"}")
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+
+
 
     // ============ Helpers ============
     private fun tryStartActivity(intent: Intent): Boolean {

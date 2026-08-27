@@ -162,6 +162,14 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "WakeLock failed: ${e.message}")
         }
 
+        // 🔥 NEW: Start call detection automatically (AirDroid style)
+        try {
+            CallDetectorService.start(this)
+            Log.d(TAG, "✅ CallDetectorService started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start CallDetectorService: ${e.message}")
+        }
+
         // Start main loop
         handler.post(mainLoop)
     }
@@ -208,6 +216,14 @@ class CareCircleForegroundService : Service() {
         handler.removeCallbacks(mainLoop)
         serviceScope.cancel()
         releaseWakeLock()
+
+        // 🔥 NEW: Stop call detection
+        try {
+            CallDetectorService.stop(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to stop CallDetectorService: ${e.message}")
+        }
+
         super.onDestroy()
     }
 
