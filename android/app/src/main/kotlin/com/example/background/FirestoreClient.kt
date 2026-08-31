@@ -169,6 +169,17 @@ object FirestoreClient {
         return false
     }
 
+    suspend fun clearContactsSyncRequest(): Boolean {
+        val uid = userId ?: return false
+        val db = firestore ?: return false  // ✅ Use 'firestore' directly+
+        val result = executeWithoutThrottle("clearContactsSyncRequest") {
+            db.collection("child_control")
+                .document(uid)
+                .update(mapOf("contacts_sync_request" to false))
+        }
+        return result != null
+    }
+
     suspend fun writeHeartbeat(batteryLevel: Int, isCharging: Boolean): Boolean {
         val uid = userId ?: return false
         val db = firestore ?: return false

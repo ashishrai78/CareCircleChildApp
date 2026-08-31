@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.firebase.firestore.FieldValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.tasks.await
 
 /**
  * 📱 ContactsSyncHelper — syncs contacts to Firestore
@@ -109,7 +110,3 @@ class ContactsSyncHelper(private val context: Context) {
     }
 }
 
-// 🔥 Extension to await Task
-suspend fun <T> com.google.android.gms.tasks.Task<T>.await(): T {
-    return kotlinx.coroutines.tasks.await(this)
-}

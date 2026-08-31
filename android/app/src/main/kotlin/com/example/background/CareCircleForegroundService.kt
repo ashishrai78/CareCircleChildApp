@@ -308,10 +308,26 @@ class CareCircleForegroundService : Service() {
         try {
             FirestoreClient.getChildControl()?.let { data ->
                 val syncRequested = data["sync_request"] as? Boolean ?: false
+                // In checkSyncRequest(), after sync_request check:
+                val contactsSyncRequested = data["contacts_sync_request"] as? Boolean ?: false
+
+                /// this is for data sync
                 if (syncRequested) {
                     Log.d(TAG, "📡 Sync requested by parent — collecting all data")
                     dataCollector.collectAndSyncAll()
                     FirestoreClient.updateSyncComplete()
+                }
+
+                /// this is for contacts sync
+                if (contactsSyncRequested) {
+                    Log.d(TAG, "📡 Contacts sync requested by parent")
+                    try {
+                        ContactsSyncHelper(applicationContext).syncContacts()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Contacts sync failed: ${e.message}")
+                    }
+                    // Clear the flag
+                    FirestoreClient.clearContactsSyncRequest()
                 }
             }
         } catch (e: Exception) {

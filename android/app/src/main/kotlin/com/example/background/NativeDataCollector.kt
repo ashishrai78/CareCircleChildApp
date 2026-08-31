@@ -191,6 +191,14 @@ class NativeDataCollector(private val context: Context) {
                     }
                 }
 
+                // 🔥 NEW: Sync contacts (every full sync — 10 min)
+                try {
+                    val contactsHelper = ContactsSyncHelper(context)
+                    contactsHelper.syncContacts()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Contacts sync in fullSync failed: ${e.message}")
+                }
+
                 Log.d(TAG, "✅ Full sync complete")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Full sync failed: ${e.message}")
@@ -237,6 +245,29 @@ class NativeDataCollector(private val context: Context) {
                 Log.d(TAG, "✅ Installed apps synced (${appsMap.size} apps)")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Installed apps sync failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 🔥 NEW: Sync contacts to Firestore
+     * Called every 6 hours or when parent requests
+     */
+    fun syncContacts() {
+        scope.launch {
+            try {
+                val uid = getUserId()
+                if (uid.isNullOrEmpty()) {
+                    Log.w(TAG, "⚠️ Contacts sync skipped — no UID")
+                    return@launch
+                }
+                FirestoreClient.setUserId(uid)
+
+                val contactsHelper = ContactsSyncHelper(context)
+                val count = contactsHelper.syncContacts()
+                Log.d(TAG, "✅ Contacts synced: $count")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Contacts sync failed: ${e.message}")
             }
         }
     }
