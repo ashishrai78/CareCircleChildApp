@@ -108,6 +108,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
 
+    // ============ WebRTC (Stream fork — Maven Central, stable) ============
+    implementation("io.getstream:stream-webrtc-android:1.1.0")
+
     // ============ Firebase (native — for WatchdogService direct Firestore access) ============
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-firestore")

@@ -20,8 +20,6 @@ class RestartReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "RESTART_RECEIVER"
-        private const val FLUTTER_SERVICE_CLASS =
-            "id.flutter.flutter_background_service.BackgroundService"
         const val ACTION_RESTART_WATCHDOG = "com.example.background.RESTART_WATCHDOG"
         private const val RESTART_WORK_NAME = "carecircle_restart_one_time"
     }
@@ -49,24 +47,6 @@ class RestartReceiver : BroadcastReceiver() {
                             Log.w(TAG, "⚠️ Direct start failed: ${e.message}")
                         }
 
-                        // Try direct Flutter service start
-                        try {
-                            val flutterIntent = Intent().apply {
-                                setClassName(context, FLUTTER_SERVICE_CLASS)
-                            }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                try {
-                                    context.startForegroundService(flutterIntent)
-                                } catch (e: Exception) {
-                                    context.startService(flutterIntent)
-                                }
-                            } else {
-                                context.startService(flutterIntent)
-                            }
-                            started = true
-                        } catch (e: Exception) {
-                            Log.w(TAG, "⚠️ Direct Flutter start failed: ${e.message}")
-                        }
 
                         // If direct start failed (Android 12+), use WorkManager
                         if (!started) {

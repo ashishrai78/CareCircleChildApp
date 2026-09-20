@@ -82,19 +82,6 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- 🔥 Notification channel for flutter_background_service plugin -->
-        <meta-data
-            android:name="id.flutter.flutter_background_service.notification.channel_id"
-            android:value="carecircle_service" />
-        <meta-data
-            android:name="id.flutter.flutter_background_service.notification.channel_name"
-            android:value="CareCircle Service" />
-        <meta-data
-            android:name="id.flutter.flutter_background_service.notification.channel_description"
-            android:value="Keeps monitoring running in background" />
-        <meta-data
-            android:name="id.flutter.flutter_background_service.notification.icon"
-            android:value="@mipmap/ic_launcher" />
 
         <!-- ============ MAIN ACTIVITY ============ -->
         <activity
@@ -116,15 +103,7 @@
             </intent-filter>
         </activity>
 
-        <!-- ============ FLUTTER BACKGROUND SERVICE ============ -->
-        <service
-            android:name="id.flutter.flutter_background_service.BackgroundService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location|microphone|dataSync"
-            android:icon="@mipmap/ic_launcher"
-            android:stopWithTask="false"
-            tools:replace="android:exported, android:foregroundServiceType" />
+
 
         <!-- ============ MASTER FOREGROUND SERVICE (Option B architecture) ============ -->
         <service

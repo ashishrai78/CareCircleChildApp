@@ -23,8 +23,6 @@ class BootReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "BOOT_RECEIVER"
-        private const val FLUTTER_SERVICE_CLASS =
-            "id.flutter.flutter_background_service.BackgroundService"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -60,30 +58,5 @@ class BootReceiver : BroadcastReceiver() {
             Log.e(TAG, "❌ ForegroundService start failed: ${e.message}")
         }
 
-        // 2. Start Flutter BackgroundService (for WebRTC mic streaming)
-        try {
-            val flutterIntent = Intent().apply {
-                setClassName(context, FLUTTER_SERVICE_CLASS)
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    context.startForegroundService(flutterIntent)
-                    Log.d(TAG, "✅ Flutter service started (foreground)")
-                } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ Foreground start failed: ${e.message}")
-                    try {
-                        context.startService(flutterIntent)
-                    } catch (e2: Exception) {
-                        Log.e(TAG, "❌ All Flutter service start attempts failed: ${e2.message}")
-                    }
-                }
-            } else {
-                context.startService(flutterIntent)
-                Log.d(TAG, "✅ Flutter service started (legacy)")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Flutter service start failed: ${e.message}")
-        }
     }
 }

@@ -18,8 +18,6 @@ class WatchdogRestartWorker(
 
     companion object {
         private const val TAG = "WatchdogRestartWorker"
-        private const val FLUTTER_SERVICE_CLASS =
-            "id.flutter.flutter_background_service.BackgroundService"
     }
 
     override fun doWork(): Result {
@@ -29,27 +27,6 @@ class WatchdogRestartWorker(
             // Restart master foreground service
             CareCircleForegroundService.start(applicationContext)
 
-            // Restart Flutter BackgroundService
-            try {
-                val flutterIntent = android.content.Intent().apply {
-                    setClassName(
-                        applicationContext,
-                        FLUTTER_SERVICE_CLASS
-                    )
-                }
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    try {
-                        applicationContext.startForegroundService(flutterIntent)
-                    } catch (e: Exception) {
-                        applicationContext.startService(flutterIntent)
-                    }
-                } else {
-                    applicationContext.startService(flutterIntent)
-                }
-                Log.d(TAG, "✅ Flutter service restarted")
-            } catch (e: Exception) {
-                Log.w(TAG, "Flutter restart failed (non-fatal): ${e.message}")
-            }
 
             Result.success()
         } catch (e: Exception) {
