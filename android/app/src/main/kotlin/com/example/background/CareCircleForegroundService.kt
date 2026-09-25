@@ -351,16 +351,27 @@ class CareCircleForegroundService : Service() {
                     FirestoreClient.clearContactsSyncRequest()
                 }
 
+
                 // 🔥 NEW: Handle audio listening (sync_mic)
-                if (syncMic && !webrtcRunning) {
-                    if (callId.isNullOrEmpty()) {
-                        Log.w(TAG, "⚠️ sync_mic=true but call_id missing")
-                    } else {
-                        Log.d(TAG, "🎤 Starting audio listening for call $callId")
-                        try {
-                            if (nativeWebRTC == null) {
-                                nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
+                if (syncMic && !callId.isNullOrEmpty()) {
+
+                    // 🔥 FIX: If call_id changed OR webrtc not running, restart WebRTC
+                    if (webrtcCallId != callId || !webrtcRunning) {
+                        Log.d(TAG, "🎤 Audio requested for call $callId (previous: $webrtcCallId)")
+
+                        // Stop previous session if any
+                        if (webrtcRunning) {
+                            Log.d(TAG, "🔄 Call ID changed — stopping old WebRTC session")
+                            try {
+                                nativeWebRTC?.stop()
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Old WebRTC stop failed: ${e.message}")
                             }
+                        }
+
+                        // Start new session
+                        try {
+                            nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
                             nativeWebRTC?.start(callId)
                             webrtcRunning = true
                             webrtcCallId = callId
@@ -379,6 +390,8 @@ class CareCircleForegroundService : Service() {
                             )
                         } catch (e: Exception) {
                             Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
+                            webrtcRunning = false
+                            webrtcCallId = null
                         }
                     }
                 } else if (!syncMic && webrtcRunning) {

@@ -158,6 +158,8 @@ class NativeWebRTCAudioSender(private val context: Context) {
             val audioDevice = JavaAudioDeviceModule.builder(context)
                 .setUseHardwareAcousticEchoCanceler(false)
                 .setUseHardwareNoiseSuppressor(false)
+                // 🔥 CRITICAL FIX: Use MIC source (1) instead of VOICE_COMMUNICATION (7)
+                .setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
                 .createAudioDeviceModule()
 
             // Create encoder/decoder factories
@@ -175,7 +177,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
                 .createPeerConnectionFactory()
 
             factoryInitialized = true
-            Log.d(TAG, "✅ PeerConnectionFactory initialized")
+            Log.d(TAG, "✅ PeerConnectionFactory initialized (AudioSource: MIC)")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Factory init failed: ${e.message}")
             throw e
@@ -273,23 +275,13 @@ class NativeWebRTCAudioSender(private val context: Context) {
 
     private fun captureMicAndAddTrack() {
         try {
-            // 🔥 CRITICAL: Set audio mode to MODE_IN_COMMUNICATION
-            // This allows VOICE_COMMUNICATION source to work in background on Android 10+
+            // 🔥 FIX: Use MODE_NORMAL (NOT MODE_IN_COMMUNICATION)
+            // MODE_IN_COMMUNICATION causes Android to upgrade MIC source to VOICE_COMMUNICATION
+            // which is BLOCKED in background on Android 10+
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            audioManager.mode = android.media.AudioManager.MODE_NORMAL
 
-            // Request audio focus (transient) — helps with background mic access
-            val focusRequest = android.media.AudioFocusRequest.Builder(
-                android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-            ).setAudioAttributes(
-                android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            ).build()
-            audioManager.requestAudioFocus(focusRequest)
-
-            Log.d(TAG, "🔊 Audio mode set to IN_COMMUNICATION + focus acquired")
+            Log.d(TAG, "🔊 Audio mode: NORMAL (MIC source will be used)")
 
             // Audio constraints — RAW ambient audio
             val constraints = MediaConstraints().apply {
