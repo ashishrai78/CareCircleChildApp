@@ -145,18 +145,6 @@ class CareCircleForegroundService : Service() {
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                     )
                 }
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    )
-                    Log.d(TAG, "✅ startForeground called (microphone)")
-                } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ startForeground with microphone failed: ${e.message}")
-                    startForeground(NOTIFICATION_ID, notification)
-                }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -513,14 +501,20 @@ class CareCircleForegroundService : Service() {
                 .setShowWhen(false)
                 .build()
 
-            // 🔥 Use NotificationManager.notify() to update the notification text/UI.
-            // NEVER call startForeground() here — calling startForeground() without MICROPHONE
-            // strips the microphone permission from the service, and Android 11-14 permanently
-            // blocks re-adding MICROPHONE from the background!
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, notification)
+            // 🔥 CRITICAL: Update foreground service type to include MICROPHONE when audio is active
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val serviceType = if (title.contains("Listening")) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                }
+                startForeground(NOTIFICATION_ID, notification, serviceType)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
 
-            Log.d(TAG, "✅ Notification text updated: $title")
+            Log.d(TAG, "✅ Notification + service type updated (audio=${title.contains("Listening")})")
         } catch (e: Exception) {
             Log.e(TAG, "Notification update failed: ${e.message}")
         }
