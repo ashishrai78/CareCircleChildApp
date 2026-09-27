@@ -294,7 +294,10 @@ class _HideAppButtonState extends State<HideAppButton> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: () => Get.back(),
+              onPressed: () {
+                Get.back();
+                SystemNavigator.pop();
+              },
               child: const Text('Got It'),
             ),
           ),

@@ -10,7 +10,7 @@ import com.google.firebase.firestore.FieldValue
 /**
  * 📱 InstalledAppsWorker — fallback safety net for installed apps sync
  *
- * Runs every 6 hours via WorkManager:
+ * Runs every 24 hours via WorkManager:
  *  - If ForegroundService is alive → just restart it (defensive)
  *  - If ForegroundService is dead → sync installed apps directly to Firestore
  *

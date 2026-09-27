@@ -1,6 +1,8 @@
 package com.example.background
 
 import android.content.Context
+import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -61,10 +63,10 @@ class NativeWebRTCAudioSender(private val context: Context) {
         private const val CALLS_COLLECTION = "calls"
         private const val CALLER_CANDIDATES_SUB = "callerCandidates"
         private const val CALLEE_CANDIDATES_SUB = "calleeCandidates"
-
-        @Volatile
-        private var factoryInitialized = false
     }
+
+    @Volatile
+    private var factoryInitialized = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val firestore = FirebaseFirestore.getInstance()
@@ -79,6 +81,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
     private var isRunning = false
     private var answerSent = false
     private val pendingCandidates = mutableListOf<IceCandidate>()
+    private var callWakeLock: PowerManager.WakeLock? = null
 
     // Firestore listeners
     private var offerListener: ListenerRegistration? = null
@@ -99,6 +102,16 @@ class NativeWebRTCAudioSender(private val context: Context) {
         isRunning = true
         answerSent = false
         pendingCandidates.clear()
+
+        // Acquire dedicated WakeLock for the duration of the audio session
+        try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            callWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CareCircle:WebRTCAudioCall")
+            callWakeLock?.acquire(15 * 60 * 1000L) // 15 min max per call
+            Log.d(TAG, "✅ Call WakeLock acquired")
+        } catch (e: Exception) {
+            Log.w(TAG, "Call WakeLock acquire failed: ${e.message}")
+        }
 
         scope.launch {
             try {
@@ -160,6 +173,28 @@ class NativeWebRTCAudioSender(private val context: Context) {
                 .setUseHardwareNoiseSuppressor(false)
                 // 🔥 CRITICAL FIX: Use MIC source (1) instead of VOICE_COMMUNICATION (7)
                 .setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+                .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
+                    override fun onWebRtcAudioRecordInitError(errorMessage: String?) {
+                        Log.e(TAG, "❌ AudioRecord init error: $errorMessage")
+                    }
+                    override fun onWebRtcAudioRecordStartError(
+                        errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode?,
+                        errorMessage: String?
+                    ) {
+                        Log.e(TAG, "❌ AudioRecord start error: $errorCode - $errorMessage")
+                    }
+                    override fun onWebRtcAudioRecordError(errorMessage: String?) {
+                        Log.e(TAG, "❌ AudioRecord error: $errorMessage")
+                    }
+                })
+                .setAudioRecordStateCallback(object : JavaAudioDeviceModule.AudioRecordStateCallback {
+                    override fun onWebRtcAudioRecordStart() {
+                        Log.d(TAG, "🎙️ AudioRecord STARTED recording successfully")
+                    }
+                    override fun onWebRtcAudioRecordStop() {
+                        Log.d(TAG, "🎙️ AudioRecord STOPPED recording")
+                    }
+                })
                 .createAudioDeviceModule()
 
             // Create encoder/decoder factories
@@ -280,6 +315,27 @@ class NativeWebRTCAudioSender(private val context: Context) {
             // which is BLOCKED in background on Android 10+
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
             audioManager.mode = android.media.AudioManager.MODE_NORMAL
+            if (audioManager.isMicrophoneMute) {
+                audioManager.isMicrophoneMute = false
+                Log.d(TAG, "🔊 Unmuted microphone")
+            }
+
+            // Request audio focus to ensure Android routes mic to our app
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val focusRequest = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                        .setAudioAttributes(
+                            android.media.AudioAttributes.Builder()
+                                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .build()
+                    audioManager.requestAudioFocus(focusRequest)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio focus request error: ${e.message}")
+            }
 
             Log.d(TAG, "🔊 Audio mode: NORMAL (MIC source will be used)")
 
@@ -292,9 +348,11 @@ class NativeWebRTCAudioSender(private val context: Context) {
 
             audioSource = factory?.createAudioSource(constraints)
             audioTrack = factory?.createAudioTrack("audio_track", audioSource)
+            audioTrack?.setEnabled(true)
+            audioTrack?.setVolume(1.0)
             peerConnection?.addTrack(audioTrack, listOf("stream_id"))
 
-            Log.d(TAG, "✅ Mic captured + track added")
+            Log.d(TAG, "✅ Mic captured + track added (enabled=true)")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Mic capture failed: ${e.message}")
             throw e
@@ -531,6 +589,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
             answerSent = false
 
             try {
+                audioTrack?.setEnabled(false)
                 audioTrack?.dispose()
             } catch (e: Exception) {
                 Log.w(TAG, "Audio track dispose error: ${e.message}")
@@ -553,11 +612,30 @@ class NativeWebRTCAudioSender(private val context: Context) {
             peerConnection = null
 
             try {
+                factory?.dispose()
+            } catch (e: Exception) {
+                Log.w(TAG, "Factory dispose error: ${e.message}")
+            }
+            factory = null
+            factoryInitialized = false
+
+            try {
                 eglBase?.release()
             } catch (e: Exception) {
                 Log.w(TAG, "EglBase release error: ${e.message}")
             }
             eglBase = null
+
+            // 🔥 Release call WakeLock
+            try {
+                if (callWakeLock?.isHeld == true) {
+                    callWakeLock?.release()
+                    Log.d(TAG, "Call WakeLock released")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Call WakeLock release error: ${e.message}")
+            }
+            callWakeLock = null
 
             // 🔥 Revert audio mode to NORMAL
             try {
@@ -584,14 +662,4 @@ class NativeWebRTCAudioSender(private val context: Context) {
      * Get current call ID
      */
     fun getCurrentCallId(): String? = currentCallId
-
-    /**
-     * Restore previous WebRTC session (called on service restart)
-     */
-    fun restoreIfNeeded(webrtcRunning: Boolean, callId: String?) {
-        if (webrtcRunning && !callId.isNullOrEmpty()) {
-            Log.d(TAG, "🔄 Restoring WebRTC session: $callId")
-            start(callId)
-        }
-    }
 }

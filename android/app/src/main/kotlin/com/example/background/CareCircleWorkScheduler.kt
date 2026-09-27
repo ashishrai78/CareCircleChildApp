@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  * Schedules:
  *  - HeartbeatWorker       (every 15 min)
  *  - UsageStatsWorker      (every 15 min)
- *  - InstalledAppsWorker   (every 6 hours)
+ *  - InstalledAppsWorker   (every 24 hours)
  *  - WatchdogRestartWorker (every 15 min) — existing
  *
  * WorkManager survives:
@@ -56,9 +56,9 @@ object CareCircleWorkScheduler {
                 usageStatsRequest
             )
 
-            // 3. Installed Apps Worker — every 6 hours
+            // 3. Installed Apps Worker — every 24 hours
             val installedAppsRequest = PeriodicWorkRequestBuilder<InstalledAppsWorker>(
-                6, TimeUnit.HOURS
+                24, TimeUnit.HOURS
             ).build()
             workManager.enqueueUniquePeriodicWork(
                 InstalledAppsWorker.WORK_NAME,

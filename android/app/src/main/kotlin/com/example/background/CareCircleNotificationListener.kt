@@ -223,6 +223,8 @@ class CareCircleNotificationListener : NotificationListenerService() {
                 .add(notifData)
                 .addOnSuccessListener {
                     Log.d(TAG, "✅ Notification saved: $appName - $title")
+                    // 🗑️ Clean up notifications older than 7 days
+                    checkAndCleanOldNotifications(uid)
                 }
                 .addOnFailureListener { e ->
                     Log.e(TAG, "❌ Failed to save notification: ${e.message}")
@@ -231,6 +233,39 @@ class CareCircleNotificationListener : NotificationListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "❌ onNotificationPosted error: ${e.message}")
         }
+    }
+
+    /**
+     * 🗑️ Delete notifications older than 7 days from Cloud Firestore (throttled: runs once every 6 hours)
+     */
+    private fun checkAndCleanOldNotifications(uid: String) {
+        val now = System.currentTimeMillis()
+        val lastClean = prefs.getLong("last_notif_cleanup_time", 0L)
+        // Run cleanup once every 6 hours
+        if (now - lastClean < 6 * 3600 * 1000L) return
+
+        prefs.edit().putLong("last_notif_cleanup_time", now).apply()
+
+        val cutoffMs = now - (7 * 24 * 3600 * 1000L)
+        firestore.collection(COLLECTION_ROOT)
+            .document(uid)
+            .collection(SUB_COLLECTION)
+            .whereLessThan("postedAt", cutoffMs)
+            .get()
+            .addOnSuccessListener { snapshot ->
+                if (snapshot != null && !snapshot.isEmpty) {
+                    val batch = firestore.batch()
+                    for (doc in snapshot.documents) {
+                        batch.delete(doc.reference)
+                    }
+                    batch.commit().addOnSuccessListener {
+                        Log.d(TAG, "🗑️ Auto-deleted ${snapshot.size()} notifications (>7 days old)")
+                    }
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Failed to clean old notifications: ${e.message}")
+            }
     }
 
     /**
@@ -248,6 +283,10 @@ class CareCircleNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.d(TAG, "✅ Notification listener connected")
+        val uid = getChildUid()
+        if (!uid.isNullOrEmpty()) {
+            checkAndCleanOldNotifications(uid)
+        }
     }
 
     /**

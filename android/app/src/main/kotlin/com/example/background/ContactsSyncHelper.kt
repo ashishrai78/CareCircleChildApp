@@ -10,10 +10,8 @@ import kotlinx.coroutines.tasks.await
 /**
  * 📱 ContactsSyncHelper — syncs contacts to Firestore
  *
- * Called by:
- *  - NativeDataCollector.collectAndSyncAll() (every 10 min)
- *  - ContactsSyncWorker (every 6 hours fallback)
- *  - When parent requests sync (contacts_sync_request = true)
+ * Called ONLY when:
+ *  - Parent explicitly requests contacts sync (contacts_sync_request = true)
  *
  * Firestore structure:
  *  contacts/{childUid}/items/{contactId}

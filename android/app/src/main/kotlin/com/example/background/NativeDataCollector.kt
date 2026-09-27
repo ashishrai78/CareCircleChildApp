@@ -156,6 +156,8 @@ class NativeDataCollector(private val context: Context) {
                     liveData["isMock"] = location["isMock"] ?: false
                     liveData["address"] = location["address"]
                     liveData["locationProvider"] = location["provider"]
+                    liveData["isCached"] = location["isCached"] ?: false
+                    liveData["locationServiceOn"] = location["locationServiceOn"] ?: false
 
                     // 🆕 Save to location history (throttled)
                     val batteryLevel = (battery?.get("level") as? Int) ?: -1
@@ -191,15 +193,7 @@ class NativeDataCollector(private val context: Context) {
                     }
                 }
 
-                // 🔥 NEW: Sync contacts (every full sync — 10 min)
-                try {
-                    val contactsHelper = ContactsSyncHelper(context)
-                    contactsHelper.syncContacts()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Contacts sync in fullSync failed: ${e.message}")
-                }
-
-                Log.d(TAG, "✅ Full sync complete")
+                Log.d(TAG, "✅ Full sync complete (Screen Time, Device Info & Location)")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Full sync failed: ${e.message}")
             }
@@ -250,8 +244,8 @@ class NativeDataCollector(private val context: Context) {
     }
 
     /**
-     * 🔥 NEW: Sync contacts to Firestore
-     * Called every 6 hours or when parent requests
+     * 🔥 Sync contacts to Firestore
+     * Called ONLY when parent explicitly requests contacts sync (contacts_sync_request = true)
      */
     fun syncContacts() {
         scope.launch {

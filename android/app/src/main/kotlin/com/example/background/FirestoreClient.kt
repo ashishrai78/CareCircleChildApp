@@ -147,9 +147,58 @@ object FirestoreClient {
 
         if (result != null) {
             Log.d(TAG, "✅ Usage data written for $dateKey")
+            // 🗑️ Automatically delete usage_data documents older than 7 days
+            try {
+                cleanOldUsageData(7)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during usage cleanup: ${e.message}")
+            }
             return true
         }
         return false
+    }
+
+    /**
+     * 🗑️ Automatically delete usage_data documents older than [daysToKeep] (default 7 days)
+     */
+    suspend fun cleanOldUsageData(daysToKeep: Int = 7): Boolean {
+        val uid = userId ?: return false
+        val db = firestore ?: return false
+
+        val cutoffCal = java.util.Calendar.getInstance().apply {
+            add(java.util.Calendar.DAY_OF_YEAR, -daysToKeep)
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val cutoffDate = cutoffCal.time
+        val sdf = java.text.SimpleDateFormat("dd-MM-yyyy", java.util.Locale.getDefault())
+
+        return try {
+            val snapshot = db.collection("usage_data")
+                .document(uid)
+                .collection("daily")
+                .get()
+                .await()
+
+            for (doc in snapshot.documents) {
+                val dateStr = doc.id
+                try {
+                    val docDate = sdf.parse(dateStr)
+                    if (docDate != null && docDate.before(cutoffDate)) {
+                        doc.reference.delete()
+                        Log.d(TAG, "🗑️ Auto-deleted old usage_data doc (>7 days old): $dateStr")
+                    }
+                } catch (e: Exception) {
+                    // Ignore doc IDs that do not match date pattern
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to clean old usage data: ${e.message}")
+            false
+        }
     }
 
     suspend fun writeInstalledApps(data: Map<String, Any?>): Boolean {
@@ -217,6 +266,30 @@ object FirestoreClient {
         return result?.let { doc ->
             if (doc.exists()) doc.data else null
         }
+    }
+
+    /**
+     * 🔥 Realtime Listener for child_control — eliminates 10s polling reads!
+     */
+    fun listenToChildControl(
+        onDataChanged: (Map<String, Any?>) -> Unit
+    ): com.google.firebase.firestore.ListenerRegistration? {
+        val uid = userId ?: return null
+        val db = firestore ?: return null
+
+        return db.collection("child_control")
+            .document(uid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.e(TAG, "Child control snapshot listener error: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null && snapshot.exists()) {
+                    snapshot.data?.let { data ->
+                        onDataChanged(data)
+                    }
+                }
+            }
     }
 
     /**
