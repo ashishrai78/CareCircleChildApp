@@ -603,6 +603,13 @@ class MainActivity : FlutterActivity() {
                         withContext(Dispatchers.Main) { result.success(stats) }
                     }
                 }
+                "syncCallLogs" -> {
+                    val days = call.argument<Int>("days") ?: 7
+                    ioScope.launch {
+                        val count = CallLogsSyncHelper(this@MainActivity).syncCallLogs(days)
+                        withContext(Dispatchers.Main) { result.success(count) }
+                    }
+                }
                 "startCallDetection" -> {
                     CallDetectorService.start(this)
                     result.success(true)

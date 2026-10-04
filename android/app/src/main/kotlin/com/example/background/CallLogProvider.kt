@@ -2,22 +2,19 @@ package com.example.background
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.provider.CallLog
+import android.provider.ContactsContract
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * 📞 CallLogProvider — reads past call history
+ * 📞 CallLogProvider — reads past call history from CallLog.Calls
  *
- * ANDROID VERSION BEHAVIOR:
- *  - Android 9 and below: ✅ Direct access (with READ_CALL_LOG permission)
- *  - Android 10+: ❌ BLOCKED for non-default dialer apps
- *                  (returns empty list, no error)
- *
- * Realme X2 (Android 10+): Will return empty list — use CallDetectorService instead
- * Older devices: Will return full history
+ * Works on ALL Android versions (Android 7.0 to Android 15+)
+ * when android.permission.READ_CALL_LOG is granted.
  */
 class CallLogProvider(private val context: Context) {
 
@@ -30,36 +27,53 @@ class CallLogProvider(private val context: Context) {
             context.checkSelfPermission(android.Manifest.permission.READ_CALL_LOG) ==
                     PackageManager.PERMISSION_GRANTED
         } else {
-            // Older Android — READ_PHONE_STATE covers it
             context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) ==
                     PackageManager.PERMISSION_GRANTED
         }
     }
 
     /**
-     * Check if device allows direct CallLog access
-     * Android 10+ blocks this for non-default dialer apps
+     * Check if direct CallLog access is available (permission is granted)
      */
     fun isDirectAccessAvailable(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        return hasPermission()
     }
 
     /**
-     * Get call history (limited by maxResults)
-     * Returns empty list on Android 10+
+     * Get recent call history (limited by maxResults)
      */
     suspend fun getCallHistory(maxResults: Int = 100): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
-        val calls = mutableListOf<Map<String, Any?>>()
-
         if (!hasPermission()) {
             Log.w(TAG, "READ_CALL_LOG permission not granted")
             return@withContext emptyList()
         }
 
-        if (!isDirectAccessAvailable()) {
-            Log.w(TAG, "⚠️ Direct CallLog access blocked on Android 10+ — using CallDetectorService instead")
+        queryCallLogs(selection = null, selectionArgs = null, limit = maxResults)
+    }
+
+    /**
+     * Get calls since a specific timestamp (e.g. past 7 days)
+     */
+    suspend fun getCallHistorySince(sinceTimeMs: Long, maxResults: Int = 500): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
+        if (!hasPermission()) {
+            Log.w(TAG, "READ_CALL_LOG permission not granted")
             return@withContext emptyList()
         }
+
+        val selection = "${CallLog.Calls.DATE} >= ?"
+        val selectionArgs = arrayOf(sinceTimeMs.toString())
+        queryCallLogs(selection, selectionArgs, limit = maxResults)
+    }
+
+    /**
+     * Internal helper to query CallLog.Calls
+     */
+    private fun queryCallLogs(
+        selection: String?,
+        selectionArgs: Array<String>?,
+        limit: Int
+    ): List<Map<String, Any?>> {
+        val calls = mutableListOf<Map<String, Any?>>()
 
         try {
             val projection = arrayOf(
@@ -72,19 +86,26 @@ class CallLogProvider(private val context: Context) {
                 CallLog.Calls.CACHED_NUMBER_TYPE
             )
 
+            val sortOrder = "${CallLog.Calls.DATE} DESC LIMIT $limit"
+
             context.contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
                 projection,
-                null,
-                null,
-                "${CallLog.Calls.DATE} DESC LIMIT $maxResults"
+                selection,
+                selectionArgs,
+                sortOrder
             )?.use { cursor ->
                 while (cursor.moveToNext()) {
-                    val number = cursor.getString(cursor.getColumnIndexOrThrow(CallLog.Calls.NUMBER)) ?: "Unknown"
+                    val rawNumber = cursor.getString(cursor.getColumnIndexOrThrow(CallLog.Calls.NUMBER)) ?: "Unknown"
                     val date = cursor.getLong(cursor.getColumnIndexOrThrow(CallLog.Calls.DATE))
                     val duration = cursor.getLong(cursor.getColumnIndexOrThrow(CallLog.Calls.DURATION))
                     val typeInt = cursor.getInt(cursor.getColumnIndexOrThrow(CallLog.Calls.TYPE))
-                    val name = cursor.getString(cursor.getColumnIndexOrThrow(CallLog.Calls.CACHED_NAME))
+                    var name = cursor.getString(cursor.getColumnIndexOrThrow(CallLog.Calls.CACHED_NAME))
+
+                    // If cached name is empty, attempt to resolve via PhoneLookup
+                    if (name.isNullOrBlank() && rawNumber != "Unknown") {
+                        name = resolveContactName(rawNumber)
+                    }
 
                     val typeLabel = when (typeInt) {
                         CallLog.Calls.INCOMING_TYPE -> "incoming"
@@ -97,7 +118,7 @@ class CallLogProvider(private val context: Context) {
 
                     calls.add(mapOf(
                         "id" to cursor.getLong(cursor.getColumnIndexOrThrow(CallLog.Calls._ID)).toString(),
-                        "phoneNumber" to number,
+                        "phoneNumber" to rawNumber,
                         "contactName" to name,
                         "timestamp" to date,
                         "duration" to duration,
@@ -107,14 +128,40 @@ class CallLogProvider(private val context: Context) {
                 }
             }
 
-            Log.d(TAG, "✅ Loaded ${calls.size} call logs (direct access)")
+            Log.d(TAG, "✅ Loaded ${calls.size} call logs from system")
         } catch (e: SecurityException) {
             Log.e(TAG, "❌ SecurityException reading call log: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to read call log: ${e.message}")
         }
 
-        calls
+        return calls
+    }
+
+    /**
+     * Resolves contact name from ContactsContract.PhoneLookup
+     */
+    private fun resolveContactName(phoneNumber: String): String? {
+        if (phoneNumber.isBlank() || phoneNumber == "Unknown") return null
+        return try {
+            val uri = Uri.withAppendedPath(
+                ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                Uri.encode(phoneNumber)
+            )
+            context.contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(0)
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -128,7 +175,7 @@ class CallLogProvider(private val context: Context) {
             "total" to 0
         )
 
-        if (!hasPermission() || !isDirectAccessAvailable()) {
+        if (!hasPermission()) {
             return@withContext stats
         }
 

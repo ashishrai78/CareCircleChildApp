@@ -123,6 +123,15 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
       color: Color(0xFFEA580C),
       type: _PermissionType.autoStart,
     ),
+    _PermissionStep(
+      title: 'Display Over Other Apps',
+      shortTitle: 'Overlay',
+      description:
+      'Allow CareCircle to display over other apps so real-time mic listening and background safety features work reliably.',
+      icon: Icons.layers_rounded,
+      color: Color(0xFF6366F1),
+      type: _PermissionType.overlay,
+    ),
   ];
 
   @override
@@ -293,6 +302,16 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
 
             await OemPermissionService.setUserConfirmedAutoStart();
           }
+          break;
+
+      // ---------------------------------------------------------
+      // 10. DISPLAY OVER OTHER APPS (OVERLAY FOR MIC-GATE)
+      // ---------------------------------------------------------
+        case 10:
+          await _permissionChannel.invokeMethod('openOverlaySettings');
+          await Future.delayed(
+            const Duration(seconds: 1),
+          );
           break;
       }
 
@@ -660,6 +679,9 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
         if (step.type == _PermissionType.autoStart)
           _buildAutoStartInfo(),
 
+        if (step.type == _PermissionType.overlay)
+          _buildOverlayInfo(),
+
         const SizedBox(height: 10),
       ],
     );
@@ -795,6 +817,17 @@ class _PermissionSetupScreenState extends State<PermissionSetupScreen>
             ),
           ),
       ],
+    );
+  }
+
+  Widget _buildOverlayInfo() {
+    return _buildInfoCard(
+      icon: Icons.layers_rounded,
+      title: 'Display over other apps',
+      description:
+      'The Android settings screen will open. Enable "Allow display over other apps" for CareCircle and return to this app.',
+      color: Colors.indigo,
+      showArrow: true,
     );
   }
 
@@ -1084,6 +1117,7 @@ enum _PermissionType {
   battery,
   deviceAdmin,
   autoStart,
+  overlay,
 }
 
 class _PermissionStep {

@@ -140,6 +140,16 @@ class CallDetectorService : Service() {
             )
             isRunning = true
             Log.d(TAG, "✅ Phone state listener registered")
+
+            // Sync past 7 days of call logs immediately
+            serviceScope.launch {
+                try {
+                    val synced = CallLogsSyncHelper(this@CallDetectorService).syncCallLogs(days = 7)
+                    Log.d(TAG, "📞 Initial call logs synced: $synced calls")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Initial call logs sync failed: ${e.message}")
+                }
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "❌ SecurityException — READ_PHONE_STATE missing: ${e.message}")
         } catch (e: Exception) {
@@ -212,13 +222,13 @@ class CallStateListener(
                 if (lastState == TelephonyManager.CALL_STATE_RINGING) {
                     // Phone was ringing, but never picked up → MISSED CALL
                     Log.d(TAG, "📞 MISSED call")
-                    logCall("missed", phoneNumber, 0L)
+                    handleCallFinished("missed", phoneNumber, 0L)
                 } else if (lastState == TelephonyManager.CALL_STATE_OFFHOOK) {
                     // Call was ongoing → ENDED
                     val duration = (System.currentTimeMillis() - callStartTime) / 1000
                     val type = if (isIncoming) "incoming" else "outgoing"
                     Log.d(TAG, "📞 $type call ENDED (duration: ${duration}s)")
-                    logCall(type, phoneNumber, duration)
+                    handleCallFinished(type, phoneNumber, duration)
                 }
                 // Reset state
                 isIncoming = false
@@ -231,37 +241,74 @@ class CallStateListener(
     }
 
     /**
-     * Log call to Firestore
+     * Handle completed call: sync official CallLog or fallback to PhoneStateListener
      */
-    private fun logCall(type: String, phoneNumber: String?, durationSec: Long) {
+    private fun handleCallFinished(type: String, phoneNumber: String?, durationSec: Long) {
+        scope.launch {
+            try {
+                // Wait 1.5s for Android telecom system to write the call record
+                kotlinx.coroutines.delay(1500)
+
+                val syncHelper = CallLogsSyncHelper(context)
+                val callLogProvider = CallLogProvider(context)
+
+                if (callLogProvider.hasPermission()) {
+                    Log.d(TAG, "📞 Fetching accurate call log with Name, Number, Duration...")
+                    val synced = syncHelper.syncCallLogs(days = 1)
+                    if (synced > 0) {
+                        return@launch
+                    }
+                }
+
+                // Fallback if permission not granted or call not in CallLog
+                logFallbackCall(type, phoneNumber, durationSec)
+
+                getChildUid()?.let { uid ->
+                    syncHelper.checkAndCleanOldCallLogs(uid)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "handleCallFinished exception: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Fallback log when READ_CALL_LOG permission is unavailable
+     */
+    private fun logFallbackCall(type: String, phoneNumber: String?, durationSec: Long) {
         scope.launch {
             try {
                 val uid = getChildUid() ?: return@launch
-                FirestoreClient.init(context)
-                FirestoreClient.setUserId(uid)
+                val now = System.currentTimeMillis()
+                val cleanPhone = (phoneNumber ?: "Unknown")
 
                 val callData = mutableMapOf<String, Any?>(
-                    "type" to type,  // "incoming", "outgoing", "missed"
-                    "phoneNumber" to (phoneNumber ?: "Unknown"),
+                    "type" to type,
+                    "phoneNumber" to cleanPhone,
+                    "contactName" to if (cleanPhone != "Unknown") null else null,
                     "duration" to durationSec,
                     "timestamp" to FieldValue.serverTimestamp(),
-                    "deviceTime" to System.currentTimeMillis(),
-                    "detectedBy" to "phone_state_listener"
+                    "deviceTime" to now,
+                    "detectedBy" to "phone_state_listener",
+                    "source" to "realtime_listener"
                 )
 
                 val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                val docId = "${now}_${type}_${cleanPhone.replace(Regex("[^0-9+]"), "").takeLast(10)}"
+
                 db.collection("call_logs")
                     .document(uid)
                     .collection("items")
-                    .add(callData)
+                    .document(docId)
+                    .set(callData, com.google.firebase.firestore.SetOptions.merge())
                     .addOnSuccessListener {
-                        Log.d(TAG, "✅ Call logged: $type (duration: ${durationSec}s)")
+                        Log.d(TAG, "✅ Fallback call logged: $type (duration: ${durationSec}s)")
                     }
                     .addOnFailureListener { e ->
-                        Log.e(TAG, "❌ Failed to log call: ${e.message}")
+                        Log.e(TAG, "❌ Failed to log fallback call: ${e.message}")
                     }
             } catch (e: Exception) {
-                Log.e(TAG, "logCall exception: ${e.message}")
+                Log.e(TAG, "logFallbackCall exception: ${e.message}")
             }
         }
     }

