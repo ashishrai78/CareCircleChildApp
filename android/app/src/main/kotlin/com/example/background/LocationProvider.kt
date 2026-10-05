@@ -391,11 +391,8 @@ class LocationProvider(private val context: Context) {
                 "lat" to lat,
                 "lng" to lng,
                 "accuracy" to accuracy,
-                "altitude" to 0.0,
                 "speed" to 0f,
-                "bearing" to 0f,
                 "timestamp" to if (time > 0) time else System.currentTimeMillis(),
-                "isMock" to false,
                 "address" to address,
                 "provider" to if (provider.startsWith("cached_")) provider else "cached_$provider",
                 "isCached" to true,
@@ -439,13 +436,6 @@ class LocationProvider(private val context: Context) {
     }
 
     private suspend fun buildLocationMap(location: Location): Map<String, Any?> {
-        val isMock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            location.isMock
-        } else {
-            @Suppress("DEPRECATION")
-            location.isFromMockProvider
-        }
-
         var address: String? = null
         try {
             if (Geocoder.isPresent()) {
@@ -484,11 +474,8 @@ class LocationProvider(private val context: Context) {
             "lat" to location.latitude,
             "lng" to location.longitude,
             "accuracy" to location.accuracy,
-            "altitude" to location.altitude,
             "speed" to location.speed,
-            "bearing" to location.bearing,
             "timestamp" to location.time,
-            "isMock" to isMock,
             "address" to address,
             "provider" to location.provider,
             "isCached" to false,

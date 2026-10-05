@@ -2,34 +2,31 @@ package com.example.background
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.ActivityManager
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
-import android.os.Environment
-import android.os.StatFs
-import android.os.SystemClock
+import android.os.PowerManager
 import android.provider.Settings
-import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
 
 /**
- * 📱 PRODUCTION DeviceInfoProvider — collects everything in one shot
+ * 📱 OPTIMIZED DeviceInfoProvider — Lean & Battery-Friendly
  *
- * Returns:
- *  - Device: brand, model, manufacturer, os version, build number, androidId, rooted
- *  - Battery: level, charging, temp, voltage, power source
- *  - Network: type (WIFI/CELLULAR/NONE), carrier, wifi SSID, IP
- *  - Storage: total/available internal + external
- *  - Memory: total/available RAM
+ * Optimized for performance and reduced Firestore payload:
+ *  - Removed heavy & unnecessary telemetry: storage checks (StatFs), RAM checks (ActivityManager),
+ *    root checks (filesystem traversal), wifi SSID / IP / carrier (WifiManager / TelephonyManager),
+ *    battery temperature, voltage, and power source.
+ *  - Added valuable real-world parent indicators:
+ *    * isScreenOn: whether child's device screen is actively ON or locked/sleeping
+ *    * isPowerSaveMode: whether device has battery saver mode enabled (causes GPS throttling)
+ *    * ringerMode: Silent, Vibrate, or Normal (explains why child isn't answering calls)
  */
 class DeviceInfoProvider(private val context: Context) {
 
@@ -42,31 +39,45 @@ class DeviceInfoProvider(private val context: Context) {
             "device" to getDeviceInfo(),
             "battery" to getBatteryInfo(),
             "network" to getNetworkInfo(),
-            "storage" to getStorageInfo(),
-            "memory" to getMemoryInfo(),
             "timestamp" to System.currentTimeMillis()
         )
     }
 
+    /**
+     * 📱 Lean device info + real-time status (Screen, Power Saver, Ringer mode)
+     */
     fun getDeviceInfo(): Map<String, Any?> {
         return try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+            val ringerMode = when (am?.ringerMode) {
+                AudioManager.RINGER_MODE_SILENT -> "Silent"
+                AudioManager.RINGER_MODE_VIBRATE -> "Vibrate"
+                AudioManager.RINGER_MODE_NORMAL -> "Normal"
+                else -> "Normal"
+            }
+
+            val isInteractive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                pm?.isInteractive ?: false
+            } else {
+                @Suppress("DEPRECATION")
+                pm?.isScreenOn ?: false
+            }
+
+            val isPowerSaveMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                pm?.isPowerSaveMode ?: false
+            } else {
+                false
+            }
+
             mapOf(
                 "brand" to Build.BRAND,
-                "manufacturer" to Build.MANUFACTURER,
                 "model" to Build.MODEL,
-                "device" to Build.DEVICE,
-                "product" to Build.PRODUCT,
                 "osVersion" to Build.VERSION.RELEASE,
-                "sdkVersion" to Build.VERSION.SDK_INT,
-                "buildNumber" to Build.DISPLAY,
-                "fingerprint" to Build.FINGERPRINT,
-                "androidId" to Settings.Secure.getString(
-                    context.contentResolver,
-                    Settings.Secure.ANDROID_ID
-                ),
-                "uptimeMs" to SystemClock.elapsedRealtime(),
-                "bootCount" to getBootCount(),
-                "rooted" to isRooted()
+                "isScreenOn" to isInteractive,
+                "isPowerSaveMode" to isPowerSaveMode,
+                "ringerMode" to ringerMode
             )
         } catch (e: Exception) {
             Log.e(TAG, "DeviceInfo error: ${e.message}")
@@ -74,6 +85,9 @@ class DeviceInfoProvider(private val context: Context) {
         }
     }
 
+    /**
+     * 🔋 Battery status — level & charging state only (fast & lightweight)
+     */
     @SuppressLint("BroadcastReceiverRegistration")
     fun getBatteryInfo(): Map<String, Any?> {
         return try {
@@ -88,32 +102,9 @@ class DeviceInfoProvider(private val context: Context) {
             val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                     status == BatteryManager.BATTERY_STATUS_FULL
 
-            val plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
-            val powerSource = when (plugged) {
-                BatteryManager.BATTERY_PLUGGED_AC -> "AC"
-                BatteryManager.BATTERY_PLUGGED_USB -> "USB"
-                BatteryManager.BATTERY_PLUGGED_WIRELESS -> "WIRELESS"
-                else -> "NONE"
-            }
-
-            val temp = battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) / 10.0
-            val voltage = battery.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) / 1000.0
-            val health = when (battery.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)) {
-                BatteryManager.BATTERY_HEALTH_GOOD -> "GOOD"
-                BatteryManager.BATTERY_HEALTH_OVERHEAT -> "OVERHEAT"
-                BatteryManager.BATTERY_HEALTH_DEAD -> "DEAD"
-                BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "OVER_VOLTAGE"
-                BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE -> "FAILURE"
-                else -> "UNKNOWN"
-            }
-
             mapOf(
                 "level" to percent,
-                "isCharging" to isCharging,
-                "powerSource" to powerSource,
-                "temperature" to temp,
-                "voltage" to voltage,
-                "health" to health
+                "isCharging" to isCharging
             )
         } catch (e: Exception) {
             Log.e(TAG, "Battery error: ${e.message}")
@@ -121,6 +112,9 @@ class DeviceInfoProvider(private val context: Context) {
         }
     }
 
+    /**
+     * 🌐 Network info — type (WIFI/CELLULAR/NONE) & internet reachability (no WifiManager/carrier bloat)
+     */
     @SuppressLint("MissingPermission")
     fun getNetworkInfo(): Map<String, Any?> {
         return try {
@@ -129,10 +123,6 @@ class DeviceInfoProvider(private val context: Context) {
             val caps = cm.getNetworkCapabilities(network)
 
             var type = "NONE"
-            var carrier = ""
-            var wifiSsid = ""
-            var ip = ""
-
             if (caps != null) {
                 type = when {
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
@@ -142,33 +132,8 @@ class DeviceInfoProvider(private val context: Context) {
                 }
             }
 
-            if (type == "WIFI") {
-                try {
-                    val wm = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                    val info = wm.connectionInfo
-                    wifiSsid = info.ssid?.removePrefix("\"")?.removeSuffix("\"") ?: ""
-                    ip = intToIp(info.ipAddress)
-                } catch (_: Exception) {}
-            }
-
-            if (type == "CELLULAR") {
-                try {
-                    val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-                    if (ActivityCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.READ_PHONE_STATE
-                        ) == PackageManager.PERMISSION_GRANTED
-                    ) {
-                        carrier = tm.networkOperatorName ?: ""
-                    }
-                } catch (_: Exception) {}
-            }
-
             mapOf(
                 "type" to type,
-                "carrier" to carrier,
-                "wifiSsid" to wifiSsid,
-                "ip" to ip,
                 "hasInternet" to (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ?: false)
             )
         } catch (e: Exception) {
@@ -177,53 +142,17 @@ class DeviceInfoProvider(private val context: Context) {
         }
     }
 
-    fun getStorageInfo(): Map<String, Any?> {
-        return try {
-            val internal = StatFs(Environment.getDataDirectory().path)
-            val external = if (Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED) {
-                StatFs(Environment.getExternalStorageDirectory().path)
-            } else null
+    /**
+     * Storage & Memory info have been deprecated to save CPU, battery, and Firebase bandwidth.
+     * Retained as emptyMap to maintain MethodChannel backward compatibility.
+     */
+    fun getStorageInfo(): Map<String, Any?> = emptyMap()
 
-            val internalTotal = internal.totalBytes / (1024 * 1024)
-            val internalAvail = internal.availableBytes / (1024 * 1024)
+    fun getMemoryInfo(): Map<String, Any?> = emptyMap()
 
-            val result = mutableMapOf<String, Any?>(
-                "internalTotalMB" to internalTotal,
-                "internalAvailableMB" to internalAvail,
-                "internalUsedPercentage" to ((internalTotal - internalAvail) * 100 / internalTotal.coerceAtLeast(1))
-            )
-
-            if (external != null) {
-                result["externalTotalMB"] = external.totalBytes / (1024 * 1024)
-                result["externalAvailableMB"] = external.availableBytes / (1024 * 1024)
-            }
-
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "Storage error: ${e.message}")
-            emptyMap()
-        }
-    }
-
-    fun getMemoryInfo(): Map<String, Any?> {
-        return try {
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val memInfo = ActivityManager.MemoryInfo()
-            am.getMemoryInfo(memInfo)
-
-            mapOf(
-                "totalMB" to (memInfo.totalMem / (1024 * 1024)),
-                "availableMB" to (memInfo.availMem / (1024 * 1024)),
-                "lowMemory" to memInfo.lowMemory,
-                "thresholdMB" to (memInfo.threshold / (1024 * 1024)),
-                "usedPercentage" to ((memInfo.totalMem - memInfo.availMem) * 100 / memInfo.totalMem.coerceAtLeast(1))
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Memory error: ${e.message}")
-            emptyMap()
-        }
-    }
-
+    /**
+     * Permission check for onboarding verification
+     */
     fun checkAllPermissions(): Map<String, Boolean> {
         return mapOf(
             "location" to hasPermission(Manifest.permission.ACCESS_FINE_LOCATION),
@@ -248,35 +177,9 @@ class DeviceInfoProvider(private val context: Context) {
     }
 
     private fun isBatteryOptimized(): Boolean {
-        val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             pm.isIgnoringBatteryOptimizations(context.packageName)
         } else true
-    }
-
-    private fun getBootCount(): Int {
-        return try {
-            Settings.Global.getInt(context.contentResolver, "boot_count", 0)
-        } catch (e: Exception) {
-            0
-        }
-    }
-
-    private fun isRooted(): Boolean {
-        val tags = Build.TAGS
-        if (tags != null && tags.contains("test-keys")) return true
-        val paths = arrayOf(
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su"
-        )
-        return paths.any { java.io.File(it).exists() }
-    }
-
-    private fun intToIp(ip: Int): String {
-        return "${ip and 0xFF}.${(ip shr 8) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 24) and 0xFF}"
     }
 }

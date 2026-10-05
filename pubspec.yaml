@@ -28,7 +28,6 @@ dependencies:
   firebase_core: ^4.4.0
   firebase_auth: ^6.0.1
   cloud_firestore: ^6.1.2
-  firebase_storage: ^13.0.6      # ✅ NEW: for app icons
   firebase_messaging: ^16.0.0    # ✅ NEW: for parent → child push commands
   google_sign_in: ^6.3.0
 

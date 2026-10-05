@@ -78,7 +78,7 @@ class NativeDataCollector(private val context: Context) {
                 }
                 FirestoreClient.setUserId(uid)
 
-                // Run all collections in parallel with timeout
+                // Run all collections in parallel with timeout (lean & battery-optimized)
                 val locationDeferred = asyncWithTimeout(10_000) {
                     collectLocationSync()
                 }
@@ -91,12 +91,6 @@ class NativeDataCollector(private val context: Context) {
                 val networkDeferred = asyncWithTimeout(5_000) {
                     deviceInfoProvider.getNetworkInfo()
                 }
-                val storageDeferred = asyncWithTimeout(5_000) {
-                    deviceInfoProvider.getStorageInfo()
-                }
-                val memoryDeferred = asyncWithTimeout(5_000) {
-                    deviceInfoProvider.getMemoryInfo()
-                }
                 val usageDeferred = asyncWithTimeout(10_000) {
                     usageStatsProvider.getTodayUsage()
                 }
@@ -104,56 +98,36 @@ class NativeDataCollector(private val context: Context) {
                     usageStatsProvider.getCurrentActiveApp()
                 }
 
-
                 val location = locationDeferred.await()
                 val device = deviceDeferred.await()
                 val battery = batteryDeferred.await()
                 val network = networkDeferred.await()
-                val storage = storageDeferred.await()
-                val memory = memoryDeferred.await()
                 val usage = usageDeferred.await()
                 val activeApp = activeAppDeferred.await()
 
-
-                // Build combined live data map
+                // Build lean live data map (device, battery, location, network, active app)
                 val liveData = mutableMapOf<String, Any?>()
-                liveData["device"] = "${device?.get("brand") ?: "Unknown"} ${device?.get("model") ?: ""}"
+                val brand = device?.get("brand") as? String ?: ""
+                val model = device?.get("model") as? String ?: ""
+                val deviceName = "$brand $model".trim().ifEmpty { "Unknown Device" }
+
+                liveData["device"] = deviceName
                 liveData["osVersion"] = device?.get("osVersion")
-                liveData["sdkVersion"] = device?.get("sdkVersion")
-                liveData["buildNumber"] = device?.get("buildNumber")
-                liveData["androidId"] = device?.get("androidId")
-                liveData["uptimeMs"] = device?.get("uptimeMs")
-                liveData["rooted"] = device?.get("rooted") ?: false
+                liveData["isScreenOn"] = device?.get("isScreenOn") ?: false
+                liveData["isPowerSaveMode"] = device?.get("isPowerSaveMode") ?: false
+                liveData["ringerMode"] = device?.get("ringerMode") ?: "Normal"
 
                 liveData["battery"] = battery?.get("level") ?: -1
                 liveData["isCharging"] = battery?.get("isCharging") ?: false
-                liveData["batteryTemp"] = battery?.get("temperature")
-                liveData["batteryVoltage"] = battery?.get("voltage")
-                liveData["batteryHealth"] = battery?.get("health")
-                liveData["powerSource"] = battery?.get("powerSource")
 
-                liveData["networkType"] = network?.get("type")
-                liveData["carrier"] = network?.get("carrier")
-                liveData["wifiSsid"] = network?.get("wifiSsid")
-                liveData["ip"] = network?.get("ip")
+                liveData["networkType"] = network?.get("type") ?: "NONE"
                 liveData["hasInternet"] = network?.get("hasInternet") ?: false
-
-                liveData["storageTotalMB"] = storage?.get("internalTotalMB")
-                liveData["storageAvailableMB"] = storage?.get("internalAvailableMB")
-                liveData["storageUsedPct"] = storage?.get("internalUsedPercentage")
-
-                liveData["ramTotalMB"] = memory?.get("totalMB")
-                liveData["ramAvailableMB"] = memory?.get("availableMB")
-                liveData["ramUsedPct"] = memory?.get("usedPercentage")
 
                 if (location != null) {
                     liveData["lat"] = location["lat"]
                     liveData["lng"] = location["lng"]
                     liveData["accuracy"] = location["accuracy"]
-                    liveData["altitude"] = location["altitude"]
                     liveData["speed"] = location["speed"]
-                    liveData["bearing"] = location["bearing"]
-                    liveData["isMock"] = location["isMock"] ?: false
                     liveData["address"] = location["address"]
                     liveData["locationProvider"] = location["provider"]
                     liveData["isCached"] = location["isCached"] ?: false
@@ -173,6 +147,7 @@ class NativeDataCollector(private val context: Context) {
                 }
 
                 liveData["timestamp"] = FieldValue.serverTimestamp()
+                liveData["serviceAlive"] = true
                 liveData["nativeCollector"] = true
 
                 // Push live data
@@ -342,16 +317,13 @@ class NativeDataCollector(private val context: Context) {
                 return
             }
 
-            // Build history document
+            // Build history document (clean & lightweight)
             val historyData = mapOf(
                 "lat" to lat,
                 "lng" to lng,
                 "accuracy" to location["accuracy"],
-                "altitude" to location["altitude"],
                 "speed" to location["speed"],
-                "bearing" to location["bearing"],
                 "address" to location["address"],
-                "isMock" to location["isMock"],
                 "provider" to location["provider"],
                 "battery" to batteryLevel,
                 "timestamp" to FieldValue.serverTimestamp()
