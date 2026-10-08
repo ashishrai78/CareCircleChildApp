@@ -60,6 +60,32 @@ class CallLogsSyncHelper(private val context: Context) {
                 return@withContext 0
             }
 
+            val isOnline = NetworkUtils.isNetworkAvailable(context)
+            if (!isOnline) {
+                Log.d(TAG, "📵 Device offline: Caching ${calls.size} call logs locally in SQLite")
+                val db = OfflineSyncDatabase.getInstance(context)
+                for (call in calls) {
+                    val timestampMs = (call["timestamp"] as? Long) ?: continue
+                    val type = (call["type"] as? String) ?: "unknown"
+                    val rawPhone = (call["phoneNumber"] as? String) ?: "Unknown"
+                    val cleanPhone = rawPhone.replace(Regex("[^0-9+]"), "").takeLast(10)
+                    val docId = "${timestampMs}_${type}_$cleanPhone"
+
+                    db.saveCallLog(
+                        uid = uid,
+                        docId = docId,
+                        type = type,
+                        phoneNumber = rawPhone,
+                        contactName = call["contactName"] as? String,
+                        duration = (call["duration"] as? Long) ?: 0L,
+                        deviceTime = timestampMs,
+                        detectedBy = "call_log_provider",
+                        source = "offline_sync"
+                    )
+                }
+                return@withContext calls.size
+            }
+
             val collectionRef = firestore.collection(COLLECTION_ROOT)
                 .document(uid)
                 .collection(SUB_COLLECTION)
@@ -117,7 +143,31 @@ class CallLogsSyncHelper(private val context: Context) {
 
             totalSynced
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Call logs sync failed: ${e.message}")
+            Log.e(TAG, "❌ Call logs sync failed: ${e.message} — caching locally")
+            // Fallback: save to local offline cache on failure
+            try {
+                val calls = callLogProvider.getCallHistorySince(System.currentTimeMillis() - (days * 24 * 3600 * 1000L), 200)
+                val db = OfflineSyncDatabase.getInstance(context)
+                for (call in calls) {
+                    val timestampMs = (call["timestamp"] as? Long) ?: continue
+                    val type = (call["type"] as? String) ?: "unknown"
+                    val rawPhone = (call["phoneNumber"] as? String) ?: "Unknown"
+                    val cleanPhone = rawPhone.replace(Regex("[^0-9+]"), "").takeLast(10)
+                    val docId = "${timestampMs}_${type}_$cleanPhone"
+
+                    db.saveCallLog(
+                        uid = uid,
+                        docId = docId,
+                        type = type,
+                        phoneNumber = rawPhone,
+                        contactName = call["contactName"] as? String,
+                        duration = (call["duration"] as? Long) ?: 0L,
+                        deviceTime = timestampMs,
+                        detectedBy = "call_log_provider",
+                        source = "offline_sync_fallback"
+                    )
+                }
+            } catch (_: Exception) {}
             0
         }
     }

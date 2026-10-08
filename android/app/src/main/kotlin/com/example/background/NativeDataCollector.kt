@@ -162,6 +162,8 @@ class NativeDataCollector(private val context: Context) {
                             "apps" to usage["apps"],
                             "hourlyBreakdown" to usage["hourlyBreakdown"],
                             "sessionCount" to usage["sessionCount"],
+                            "openCount" to usage["openCount"],
+                            "totalOpenCount" to usage["totalOpenCount"],
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                         FirestoreClient.writeUsageData(dateKey, usageData)

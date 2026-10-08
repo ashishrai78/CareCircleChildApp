@@ -52,6 +52,11 @@ class RestartReceiver : BroadcastReceiver() {
                         if (!started) {
                             scheduleWorkManagerFallback(context)
                         }
+
+                        // 🌐 Trigger offline sync if network is available
+                        if (NetworkUtils.isNetworkAvailable(context)) {
+                            OfflineSyncManager.triggerSync(context, "restart_receiver_connectivity")
+                        }
                     } catch (e: Exception) {
                         Log.e(TAG, "❌ Restart failed: ${e.message}")
                         scheduleWorkManagerFallback(context)

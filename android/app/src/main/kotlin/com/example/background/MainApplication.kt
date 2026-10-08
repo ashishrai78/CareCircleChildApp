@@ -47,6 +47,15 @@ class MainApplication : Application() {
             override fun onActivityDestroyed(activity: Activity) {}
         })
 
-        Log.d("CC_APP", "MainApplication ready — MicEligibility wired")
+        // ============================================================
+        // 🌐 Network & Offline Sync Monitoring
+        // ============================================================
+        try {
+            NetworkStateMonitor.start(this)
+        } catch (e: Exception) {
+            Log.e("CC_APP", "Failed to start NetworkStateMonitor: ${e.message}")
+        }
+
+        Log.d("CC_APP", "MainApplication ready — MicEligibility & NetworkStateMonitor wired")
     }
 }

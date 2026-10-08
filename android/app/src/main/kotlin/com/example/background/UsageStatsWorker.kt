@@ -92,6 +92,8 @@ class UsageStatsWorker(
                 "apps" to usage["apps"],
                 "hourlyBreakdown" to usage["hourlyBreakdown"],
                 "sessionCount" to usage["sessionCount"],
+                "openCount" to usage["openCount"],
+                "totalOpenCount" to usage["totalOpenCount"],
                 "updatedAt" to FieldValue.serverTimestamp(),
                 "syncedBy" to "usage_stats_worker"
             )

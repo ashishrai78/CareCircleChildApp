@@ -238,6 +238,14 @@ class CareCircleForegroundService : Service() {
         // 🔥 Clean up any stale WebRTC state from previous session
         clearStaleWebRTCState()
 
+        // 🌐 Network & Offline Sync Monitoring
+        try {
+            NetworkStateMonitor.start(applicationContext)
+            OfflineSyncManager.triggerSync(applicationContext, "fgs_create")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start NetworkStateMonitor: ${e.message}")
+        }
+
         // Start main loop
         handler.post(mainLoop)
     }
@@ -384,6 +392,15 @@ class CareCircleForegroundService : Service() {
                             }
                         }
                         lastCallLogsSync = now
+                    }
+
+                    // 5. Offline sync check (if device is online and has pending offline records)
+                    if (NetworkUtils.isNetworkAvailable(applicationContext)) {
+                        val pendingCount = OfflineSyncDatabase.getInstance(applicationContext).getPendingCount()
+                        if (pendingCount > 0) {
+                            Log.d(TAG, "📦 Found $pendingCount pending offline records — triggering sync")
+                            OfflineSyncManager.triggerSync(applicationContext, "loop_pending_check")
+                        }
                     }
                 }
 

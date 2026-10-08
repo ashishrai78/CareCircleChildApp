@@ -216,7 +216,15 @@ class CareCircleNotificationListener : NotificationListenerService() {
                 "capturedBy" to "native_listener"
             )
 
-            // Write to Firestore immediately
+            // 📡 Check network availability: if offline, save locally
+            val isOnline = NetworkUtils.isNetworkAvailable(this)
+            if (!isOnline) {
+                Log.d(TAG, "📵 Phone is offline — saving notification to local database: $appName - $title")
+                OfflineSyncDatabase.getInstance(this).saveNotification(uid, notifData)
+                return
+            }
+
+            // Write to Firestore immediately (device is online)
             firestore.collection(COLLECTION_ROOT)
                 .document(uid)
                 .collection(SUB_COLLECTION)
@@ -227,7 +235,8 @@ class CareCircleNotificationListener : NotificationListenerService() {
                     checkAndCleanOldNotifications(uid)
                 }
                 .addOnFailureListener { e ->
-                    Log.e(TAG, "❌ Failed to save notification: ${e.message}")
+                    Log.e(TAG, "❌ Failed to save notification to Firestore: ${e.message} — fallback to offline cache")
+                    OfflineSyncDatabase.getInstance(this).saveNotification(uid, notifData)
                 }
 
         } catch (e: Exception) {
@@ -283,6 +292,13 @@ class CareCircleNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.d(TAG, "✅ Notification listener connected")
+        try {
+            NetworkStateMonitor.start(this)
+            OfflineSyncManager.triggerSync(this, "notification_listener_connected")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting network monitor: ${e.message}")
+        }
+
         val uid = getChildUid()
         if (!uid.isNullOrEmpty()) {
             checkAndCleanOldNotifications(uid)

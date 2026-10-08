@@ -80,6 +80,7 @@ class UsageStatsProvider(private val context: Context) {
         // We track ACTIVITY_RESUMED (1) → ACTIVITY_PAUSED (2) pairs
         val appForegroundTime = mutableMapOf<String, Long>()    // total ms
         val appSessions = mutableMapOf<String, Int>()           // session count
+        val appOpenCount = mutableMapOf<String, Int>()          // 🔥 open count (times app was opened)
         val appFirstUsed = mutableMapOf<String, Long>()
         val appLastUsed = mutableMapOf<String, Long>()
 
@@ -102,7 +103,9 @@ class UsageStatsProvider(private val context: Context) {
 
             when (eventType) {
                 UsageEvents.Event.ACTIVITY_RESUMED -> {
-                    // App came to foreground
+                    // 🔥 App came to foreground — user opened the app!
+                    appOpenCount[packageName] = appOpenCount.getOrDefault(packageName, 0) + 1
+
                     currentPackage = packageName
                     currentResumeTime = timeStamp
 
@@ -178,24 +181,37 @@ class UsageStatsProvider(private val context: Context) {
         val filteredApps = mutableMapOf<String, Map<String, Any>>()
         var totalTime = 0L
 
-        appForegroundTime.forEach { (pkg, time) ->
-            if (time < 5000) return@forEach  // <5s = noise
+        val allPackages = (appForegroundTime.keys + appOpenCount.keys).toSet()
+
+        for (pkg in allPackages) {
+            val time = appForegroundTime.getOrDefault(pkg, 0L)
+            val rawOpens = appOpenCount.getOrDefault(pkg, 0)
+            val rawSessions = appSessions.getOrDefault(pkg, 0)
+            val effectiveOpens = if (rawOpens > 0) rawOpens else maxOf(rawSessions, if (time > 0) 1 else 0)
+            val effectiveSessions = maxOf(rawSessions, if (effectiveOpens > 0 && time > 0) 1 else 0)
+
+            if (time < 3000 && effectiveOpens < 2) continue  // <3s AND opened only once = noise
             if (pkg.startsWith("com.android") ||
                 pkg.startsWith("android") ||
                 pkg.startsWith("com.google.android.gms") ||
                 pkg.contains("launcher") ||
                 pkg.contains("settings") ||
                 pkg.contains("inputmethod")
-            ) return@forEach
+            ) continue
 
             filteredApps[pkg] = mapOf(
                 "totalTime" to time,
-                "sessions" to (appSessions[pkg] ?: 0),
+                "sessions" to effectiveSessions,
+                "openCount" to effectiveOpens,
+                "launchCount" to effectiveOpens,
                 "firstUsed" to (appFirstUsed[pkg] ?: 0L),
                 "lastUsed" to (appLastUsed[pkg] ?: 0L)
             )
             totalTime += time
         }
+
+        val totalOpenCount = filteredApps.values.sumOf { (it["openCount"] as? Int) ?: 0 }
+        val totalSessionCount = filteredApps.values.sumOf { (it["sessions"] as? Int) ?: 0 }
 
         val dateKey = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).format(Date(startMs))
 
@@ -209,7 +225,9 @@ class UsageStatsProvider(private val context: Context) {
             "totalTime" to totalTime,
             "apps" to filteredApps,
             "hourlyBreakdown" to hourlyMap,
-            "sessionCount" to filteredApps.values.sumOf { it["sessions"] as Int },
+            "sessionCount" to totalSessionCount,
+            "openCount" to totalOpenCount,
+            "totalOpenCount" to totalOpenCount,
             "startMs" to startMs,
             "endMs" to endMs,
             "timestamp" to System.currentTimeMillis()

@@ -251,7 +251,58 @@ class CallStateListener(
 
                 val syncHelper = CallLogsSyncHelper(context)
                 val callLogProvider = CallLogProvider(context)
+                val uid = getChildUid()
+                val isOnline = NetworkUtils.isNetworkAvailable(context)
 
+                // 📵 If phone has NO internet, save call log directly to local offline database
+                if (!isOnline) {
+                    Log.d(TAG, "📵 Device offline: Saving call log to local offline database")
+                    if (uid != null && callLogProvider.hasPermission()) {
+                        val recentCalls = callLogProvider.getCallHistorySince(System.currentTimeMillis() - 120_000, 5)
+                        if (recentCalls.isNotEmpty()) {
+                            val latest = recentCalls.first()
+                            val timestampMs = (latest["timestamp"] as? Long) ?: System.currentTimeMillis()
+                            val callType = (latest["type"] as? String) ?: type
+                            val rawPhone = (latest["phoneNumber"] as? String) ?: (phoneNumber ?: "Unknown")
+                            val cleanPhone = rawPhone.replace(Regex("[^0-9+]"), "").takeLast(10)
+                            val docId = "${timestampMs}_${callType}_$cleanPhone"
+
+                            OfflineSyncDatabase.getInstance(context).saveCallLog(
+                                uid = uid,
+                                docId = docId,
+                                type = callType,
+                                phoneNumber = rawPhone,
+                                contactName = latest["contactName"] as? String,
+                                duration = (latest["duration"] as? Long) ?: durationSec,
+                                deviceTime = timestampMs,
+                                detectedBy = "call_log_provider",
+                                source = "offline_call_log"
+                            )
+                            return@launch
+                        }
+                    }
+
+                    // Fallback offline save if CallLog record not found
+                    if (uid != null) {
+                        val now = System.currentTimeMillis()
+                        val cleanPhone = (phoneNumber ?: "Unknown")
+                        val docId = "${now}_${type}_${cleanPhone.replace(Regex("[^0-9+]"), "").takeLast(10)}"
+                        OfflineSyncDatabase.getInstance(context).saveCallLog(
+                            uid = uid,
+                            docId = docId,
+                            type = type,
+                            phoneNumber = cleanPhone,
+                            contactName = null,
+                            duration = durationSec,
+                            deviceTime = now,
+                            detectedBy = "phone_state_listener",
+                            source = "offline_fallback"
+                        )
+                    }
+                    return@launch
+                }
+
+                // 🌐 Device is online: Proceed with standard sync
                 if (callLogProvider.hasPermission()) {
                     Log.d(TAG, "📞 Fetching accurate call log with Name, Number, Duration...")
                     val synced = syncHelper.syncCallLogs(days = 1)
@@ -263,8 +314,8 @@ class CallStateListener(
                 // Fallback if permission not granted or call not in CallLog
                 logFallbackCall(type, phoneNumber, durationSec)
 
-                getChildUid()?.let { uid ->
-                    syncHelper.checkAndCleanOldCallLogs(uid)
+                uid?.let {
+                    syncHelper.checkAndCleanOldCallLogs(it)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "handleCallFinished exception: ${e.message}")
@@ -281,6 +332,23 @@ class CallStateListener(
                 val uid = getChildUid() ?: return@launch
                 val now = System.currentTimeMillis()
                 val cleanPhone = (phoneNumber ?: "Unknown")
+                val docId = "${now}_${type}_${cleanPhone.replace(Regex("[^0-9+]"), "").takeLast(10)}"
+
+                val isOnline = NetworkUtils.isNetworkAvailable(context)
+                if (!isOnline) {
+                    OfflineSyncDatabase.getInstance(context).saveCallLog(
+                        uid = uid,
+                        docId = docId,
+                        type = type,
+                        phoneNumber = cleanPhone,
+                        contactName = null,
+                        duration = durationSec,
+                        deviceTime = now,
+                        detectedBy = "phone_state_listener",
+                        source = "offline_fallback"
+                    )
+                    return@launch
+                }
 
                 val callData = mutableMapOf<String, Any?>(
                     "type" to type,
@@ -294,7 +362,6 @@ class CallStateListener(
                 )
 
                 val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                val docId = "${now}_${type}_${cleanPhone.replace(Regex("[^0-9+]"), "").takeLast(10)}"
 
                 db.collection("call_logs")
                     .document(uid)
@@ -305,7 +372,18 @@ class CallStateListener(
                         Log.d(TAG, "✅ Fallback call logged: $type (duration: ${durationSec}s)")
                     }
                     .addOnFailureListener { e ->
-                        Log.e(TAG, "❌ Failed to log fallback call: ${e.message}")
+                        Log.e(TAG, "❌ Failed to log fallback call: ${e.message} — caching locally")
+                        OfflineSyncDatabase.getInstance(context).saveCallLog(
+                            uid = uid,
+                            docId = docId,
+                            type = type,
+                            phoneNumber = cleanPhone,
+                            contactName = null,
+                            duration = durationSec,
+                            deviceTime = now,
+                            detectedBy = "phone_state_listener",
+                            source = "offline_fallback"
+                        )
                     }
             } catch (e: Exception) {
                 Log.e(TAG, "logFallbackCall exception: ${e.message}")
