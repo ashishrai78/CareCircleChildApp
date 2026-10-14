@@ -38,7 +38,7 @@ class CallLogsSyncHelper(private val context: Context) {
     /**
      * Sync call logs from device to Firestore for the past [days] days (default: 7)
      */
-    suspend fun syncCallLogs(days: Int = 7): Int = withContext(Dispatchers.IO) {
+    suspend fun syncCallLogs(days: Int = 7, forceFullSync: Boolean = false): Int = withContext(Dispatchers.IO) {
         if (!callLogProvider.hasPermission()) {
             Log.w(TAG, "⚠️ READ_CALL_LOG permission not granted — skipping call log sync")
             return@withContext 0
@@ -60,11 +60,27 @@ class CallLogsSyncHelper(private val context: Context) {
                 return@withContext 0
             }
 
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val lastSyncedTime = if (forceFullSync) 0L else prefs.getLong("last_call_log_synced_time", 0L)
+
+            // 🔥 Incremental sync: Only upload calls newer than lastSyncedTime (saves hundreds of writes & reads)
+            val callsToSync = if (lastSyncedTime > 0L) {
+                calls.filter { ((it["timestamp"] as? Long) ?: 0L) > lastSyncedTime }
+            } else {
+                calls
+            }
+
+            if (callsToSync.isEmpty()) {
+                Log.d(TAG, "ℹ️ No new calls to sync since last sync (total in window: ${calls.size})")
+                checkAndCleanOldCallLogs(uid)
+                return@withContext 0
+            }
+
             val isOnline = NetworkUtils.isNetworkAvailable(context)
             if (!isOnline) {
-                Log.d(TAG, "📵 Device offline: Caching ${calls.size} call logs locally in SQLite")
+                Log.d(TAG, "📵 Device offline: Caching ${callsToSync.size} new call logs locally in SQLite")
                 val db = OfflineSyncDatabase.getInstance(context)
-                for (call in calls) {
+                for (call in callsToSync) {
                     val timestampMs = (call["timestamp"] as? Long) ?: continue
                     val type = (call["type"] as? String) ?: "unknown"
                     val rawPhone = (call["phoneNumber"] as? String) ?: "Unknown"
@@ -83,7 +99,7 @@ class CallLogsSyncHelper(private val context: Context) {
                         source = "offline_sync"
                     )
                 }
-                return@withContext calls.size
+                return@withContext callsToSync.size
             }
 
             val collectionRef = firestore.collection(COLLECTION_ROOT)
@@ -91,7 +107,7 @@ class CallLogsSyncHelper(private val context: Context) {
                 .collection(SUB_COLLECTION)
 
             // Firestore batch write supports up to 500 operations per batch
-            val chunks = calls.chunked(400)
+            val chunks = callsToSync.chunked(400)
             var totalSynced = 0
 
             for (chunk in chunks) {
@@ -126,9 +142,15 @@ class CallLogsSyncHelper(private val context: Context) {
                 totalSynced += chunk.size
             }
 
+            // Update last synced timestamp in prefs
+            val maxTimestamp = callsToSync.mapNotNull { it["timestamp"] as? Long }.maxOrNull() ?: 0L
+            if (maxTimestamp > lastSyncedTime) {
+                prefs.edit().putLong("last_call_log_synced_time", maxTimestamp).apply()
+            }
+
             // Update summary document
             val summaryData = mapOf(
-                "totalCallsLast7Days" to totalSynced,
+                "totalCallsLast7Days" to calls.size,
                 "lastSync" to FieldValue.serverTimestamp(),
                 "hasPermission" to true
             )
@@ -136,7 +158,7 @@ class CallLogsSyncHelper(private val context: Context) {
                 .set(summaryData, SetOptions.merge())
                 .await()
 
-            Log.d(TAG, "✅ Successfully synced $totalSynced call logs to Firestore")
+            Log.d(TAG, "✅ Successfully synced $totalSynced new call logs to Firestore (window total: ${calls.size})")
 
             // Automatically clean up old call logs (> 7 days)
             checkAndCleanOldCallLogs(uid)
