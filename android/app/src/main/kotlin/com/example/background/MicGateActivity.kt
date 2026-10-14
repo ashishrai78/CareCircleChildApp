@@ -58,22 +58,28 @@ class MicGateActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Fully transparent window — koi layout inflate nahi karte,
-        // isliye koi visual flash bhi nahi hoga
+        // Fully transparent window — koi layout inflate nahi karte
         window.setLayout(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT
         )
-        // Lock screen ke upar bhi kaam karne ke liye
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
+        // Lock screen flags for Android 8+ and legacy
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        )
         Log.d(TAG, "MicGate created")
     }
 
     override fun onStart() {
         super.onStart()
-        // Application-level lifecycle callback isko track karega,
-        // but safety ke liye yahan bhi ensure kar rahe hai
         Log.d(TAG, "MicGate started — app ab 'in use' hai")
     }
 
@@ -83,6 +89,7 @@ class MicGateActivity : Activity() {
 
         val callId = pendingCallId
         if (callId != null) {
+            pendingCallId = null // consume immediately to prevent race conditions
             val svc = serviceRef ?: CareCircleForegroundService.instanceRef
             if (svc != null) {
                 Log.d(TAG, "Audio session start via gate: callId=$callId")
@@ -90,7 +97,6 @@ class MicGateActivity : Activity() {
             } else {
                 Log.e(TAG, "Service ref null — session start nahi hua")
             }
-            pendingCallId = null
         }
 
         // 300ms baad khud band — kaam ho gaya, user ko kuch nahi dikhta
@@ -104,5 +110,9 @@ class MicGateActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "MicGate destroyed — mic session background me chalta rahega")
+        try {
+            val nm = getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            nm?.cancel(CareCircleForegroundService.MIC_GATE_NOTIF_ID)
+        } catch (_: Exception) {}
     }
 }

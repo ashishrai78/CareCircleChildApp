@@ -43,6 +43,10 @@ class AccessibilityWatchdogService : AccessibilityService() {
     companion object {
         private const val TAG = "ACCESS_BLOCKER"
 
+        /** Live reference to the active AccessibilityService instance */
+        @Volatile
+        var instanceRef: AccessibilityWatchdogService? = null
+
         // SharedPreferences keys (shared with ForegroundService)
         private const val PREFS_NAME = "carecircle_prefs"
         private const val KEY_BLOCKED_APPS = "blocked_apps_list"
@@ -120,6 +124,7 @@ class AccessibilityWatchdogService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instanceRef = this
         Log.d(TAG, "✅ AccessibilityWatchdogService connected (v4 — App Blocking Only)")
 
         // 🔥 NO startForeground (AccessibilityService doesn't need it)
@@ -202,6 +207,7 @@ class AccessibilityWatchdogService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        instanceRef = null
         Log.w(TAG, "❌ Accessibility service destroyed")
         super.onDestroy()
     }

