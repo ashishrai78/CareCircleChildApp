@@ -12,12 +12,17 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.firestore.FieldValue
@@ -72,8 +77,13 @@ class CareCircleForegroundService : Service() {
     companion object {
         private const val TAG = "CC_FOREGROUND"
         private const val CHANNEL_ID = "carecircle_foreground_channel"
+        const val AUDIO_CHANNEL_ID = "carecircle_audio_high_channel"
         private const val NOTIFICATION_ID = 1001
         const val MIC_GATE_NOTIF_ID = 2002
+
+        /** Currently active audio call ID */
+        @Volatile
+        var currentActiveCallId: String? = null
 
         // ⭐ FIX #4: 10s → 60s (battery). Snapshot listener realtime hai,
         // loop sirf defensive checks + timed syncs ke liye hai.
@@ -539,20 +549,78 @@ class CareCircleForegroundService : Service() {
         }
     }
 
+    // 🌟 Temporary 1x1 overlay window for Android 14/15/16 BAL & FGS mic exemption
+    private var micOverlayView: View? = null
+
+    fun showTemporaryOverlay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                Log.d(TAG, "Overlay permission not granted, skipping overlay window")
+                return
+            }
+        }
+        try {
+            if (micOverlayView != null) return // already attached
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val params = WindowManager.LayoutParams(
+                1, 1,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0
+                y = 0
+            }
+            val view = View(this)
+            wm.addView(view, params)
+            micOverlayView = view
+            Log.d(TAG, "✅ Temporary 1x1 TYPE_APPLICATION_OVERLAY attached (BAL & FGS mic exemption active)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Temporary overlay attach failed: ${e.message}")
+        }
+    }
+
+    fun removeTemporaryOverlay() {
+        try {
+            val view = micOverlayView ?: return
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            wm.removeView(view)
+            micOverlayView = null
+            Log.d(TAG, "🧹 Temporary overlay removed")
+        } catch (e: Exception) {
+            Log.w(TAG, "Temporary overlay remove failed: ${e.message}")
+        }
+    }
+
+    fun isAudioRunning(): Boolean = webrtcRunning
+
     /**
      * ⭐ FIX #2: MicGate launch — invisible activity se
      * "app in use" state restore karke mic legal banate hai.
-     * Compatible with Android 11 through Android 15 BAL (Background Activity Launch):
+     * Compatible with Android 10 through Android 16 BAL (Background Activity Launch):
+     *   0. Temporary TYPE_APPLICATION_OVERLAY window (official Android 14/15/16 exemption)
      *   1. Active AccessibilityService context (100% BAL exemption on Android OS)
      *   2. PendingIntent with ActivityOptions MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-     *   3. Full-Screen Intent Notification (screen-off / lockscreen wakeup)
+     *   3. Full-Screen Intent Notification on high-priority AUDIO_CHANNEL_ID
      *   4. Direct startActivity with ActivityOptions
-     *   5. Timeout Fallback: 500ms me gate resume nahi hua to direct startAudioSessionNow()
+     *   5. Timeout Fallback: 1000ms me gate resume nahi hua to direct startAudioSessionNow()
      */
     private fun launchMicGate(callId: String) {
         Log.i(TAG, "🎤 Background mic request — MicGate launch (callId=$callId)")
         MicGateActivity.serviceRef = this
         MicGateActivity.pendingCallId = callId
+        currentActiveCallId = callId
+
+        // 🌟 STEP 0: Show 1x1 TYPE_APPLICATION_OVERLAY window if overlay permission is granted.
+        // Android 14/15/16 explicitly grant BAL & FGS mic exemptions when a visible overlay window is active!
+        showTemporaryOverlay()
 
         val intent = Intent(this, MicGateActivity::class.java).apply {
             addFlags(
@@ -576,7 +644,7 @@ class CareCircleForegroundService : Service() {
             }
         }
 
-        // 🚀 STRATEGY 2: PendingIntent with Android 14/15 BAL Opt-In Flags
+        // 🚀 STRATEGY 2: PendingIntent with Android 14/15/16 BAL Opt-In Flags
         val options = ActivityOptions.makeBasic()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             options.setPendingIntentBackgroundActivityStartMode(
@@ -616,9 +684,10 @@ class CareCircleForegroundService : Service() {
             }
         }
 
-        // 🚀 STRATEGY 4: Full-Screen Intent Notification (Lock screen / Screen-off wakeup)
+        // 🚀 STRATEGY 4: Full-Screen Intent Notification on HIGH-IMPORTANCE channel
+        // MUST use AUDIO_CHANNEL_ID (IMPORTANCE_HIGH) for OS to allow Full-Screen Intent!
         try {
-            val fsiNotification = NotificationCompat.Builder(this, CHANNEL_ID)
+            val fsiNotification = NotificationCompat.Builder(this, AUDIO_CHANNEL_ID)
                 .setContentTitle("CareCircle Audio")
                 .setContentText("Establishing secure audio channel...")
                 .setSmallIcon(R.drawable.ic_notification)
@@ -629,21 +698,20 @@ class CareCircleForegroundService : Service() {
                 .build()
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(MIC_GATE_NOTIF_ID, fsiNotification)
-            Log.d(TAG, "✅ MicGate Full-Screen Intent notification posted")
+            Log.d(TAG, "✅ MicGate Full-Screen Intent notification posted on AUDIO_CHANNEL_ID")
         } catch (e: Exception) {
             Log.w(TAG, "Full-Screen Intent notification failed: ${e.message}")
         }
 
         // ⭐ STRATEGY 5 (LIFE SAVER FALLBACK):
-        // Agar Android 15 ne kisi bhi reason se MicGateActivity ko 500ms tak delay ya block kiya,
-        // to direct startAudioSessionNow(callId) call karo taaki session hang na ho!
+        // 1000ms timeout taaki cold reboot ke baad bhi gate ko open hone ka poora time mile
         handler.postDelayed({
             if (MicGateActivity.pendingCallId == callId && !webrtcRunning) {
-                Log.w(TAG, "⚠️ MicGateActivity did not resume within 500ms (Android 15 BAL restriction) — triggering direct startAudioSessionNow fallback")
+                Log.w(TAG, "⚠️ MicGateActivity did not resume within 1000ms — triggering direct startAudioSessionNow fallback")
                 MicGateActivity.pendingCallId = null
                 startAudioSessionNow(callId)
             }
-        }, 500L)
+        }, 1000L)
     }
 
     /**
@@ -652,6 +720,7 @@ class CareCircleForegroundService : Service() {
      */
     fun startAudioSessionNow(callId: String) {
         Log.i(TAG, "🎤 startAudioSessionNow callId=$callId appInUse=${MicEligibility.isAppInUse()}")
+        currentActiveCallId = callId
 
         // ⭐ Re-assert FGS WITH microphone type — background restart ke baad
         // yahi silently missing hota tha (FIX #1). App "in use" hai ab
@@ -681,6 +750,7 @@ class CareCircleForegroundService : Service() {
             nativeWebRTC?.start(callId)
             webrtcRunning = true
             webrtcCallId = callId
+            currentActiveCallId = callId
             micHealAttempts = 0 // fresh session — heal counter reset
 
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -692,6 +762,7 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "❌ WebRTC start failed: ${e.message}")
             webrtcRunning = false
             webrtcCallId = null
+            currentActiveCallId = null
             reportMicState("start_failed")
         }
     }
@@ -705,6 +776,7 @@ class CareCircleForegroundService : Service() {
             nativeWebRTC?.stop()
             webrtcRunning = false
             webrtcCallId = null
+            currentActiveCallId = null
             micHealAttempts = 0
 
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -720,26 +792,37 @@ class CareCircleForegroundService : Service() {
             reportMicState("stopped")
         } catch (e: Exception) {
             Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
+        } finally {
+            removeTemporaryOverlay()
         }
     }
 
     /**
-     * ⭐ FIX #1: FGS re-assert WITH microphone type. Fail ho to LOUD log
-     * (koi silent fallback nahi). Return: mic type granted ya nahi.
+     * ⭐ FIX #1: FGS re-assert WITH microphone type for Android 10, 11, 12, 13, 14, 15, 16+
      */
-    private fun assertForegroundWithMicType(): Boolean {
+    fun assertForegroundWithMicType(): Boolean {
         return try {
             val notification = buildNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Android 14, 15, 16+ requires SPECIAL_USE | MICROPHONE
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
                             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10, 11, 12, 13 (Q through Tiramisu) only has MICROPHONE (SPECIAL_USE throws IllegalArgumentException on API < 34!)
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
             } else {
+                // Android 9 and below
                 startForeground(NOTIFICATION_ID, notification)
             }
+            Log.d(TAG, "✅ assertForegroundWithMicType SUCCEEDED")
             true
         } catch (e: Exception) {
             Log.e(TAG, "🚨 assertForegroundWithMicType FAILED: ${e.message} — mic grant nahi hua")
@@ -806,7 +889,13 @@ class CareCircleForegroundService : Service() {
 
             val targetCallId = newCallId
             handler.postDelayed({
-                if (instanceRef != null) startAudioSessionNow(targetCallId)
+                if (instanceRef != null) {
+                    if (MicEligibility.isAppInUse()) {
+                        startAudioSessionNow(targetCallId)
+                    } else {
+                        launchMicGate(targetCallId)
+                    }
+                }
             }, 1500)
         } else {
             // Heal limit khatam — jhoth "Listening" mat dikhao
@@ -896,7 +985,10 @@ class CareCircleForegroundService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val manager = getSystemService(NotificationManager::class.java)
+
+            // Ongoing background service channel (silent/min importance)
+            val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "System Protection",
                 NotificationManager.IMPORTANCE_MIN
@@ -905,8 +997,21 @@ class CareCircleForegroundService : Service() {
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(serviceChannel)
+
+            // High-priority audio channel required for Full-Screen Intent wakeup (screen off / lockscreen)
+            val audioChannel = NotificationChannel(
+                AUDIO_CHANNEL_ID,
+                "Audio Communication",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Urgent audio connection channel for lockscreen wakeup"
+                setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(null, null) // Silent — no sound or vibrate
+                enableVibration(false)
+            }
+            manager.createNotificationChannel(audioChannel)
         }
     }
 }

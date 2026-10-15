@@ -52,8 +52,8 @@ class MicGateActivity : Activity() {
         @Volatile
         var pendingCallId: String? = null
 
-        /** Gate kitna der khula rahe */
-        private const val GATE_DURATION_MS = 300L
+        /** Gate kitna der khula rahe taaki FGS mic type aur AudioRecord stable ho jaye */
+        private const val GATE_DURATION_MS = 1500L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,21 +85,29 @@ class MicGateActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        Log.d(TAG, "MicGate resumed — ab mic start karna LEGAL hai")
+        Log.d(TAG, "MicGate resumed — ab mic start karna LEGAL hai (app is in-use)")
 
-        val callId = pendingCallId
-        if (callId != null) {
-            pendingCallId = null // consume immediately to prevent race conditions
-            val svc = serviceRef ?: CareCircleForegroundService.instanceRef
-            if (svc != null) {
+        val svc = serviceRef ?: CareCircleForegroundService.instanceRef
+        val callId = pendingCallId ?: CareCircleForegroundService.currentActiveCallId
+
+        if (svc != null) {
+            // ⭐ CRITICAL: Re-assert FGS microphone type WHILE THIS ACTIVITY IS IN FOREGROUND!
+            // Ye sabse zaroori step hai — chahe session pehle fallback se start hua ho
+            // ya abhi start ho raha ho, yahan call karne se OS mic access grant kar dega!
+            svc.assertForegroundWithMicType()
+
+            if (callId != null && !svc.isAudioRunning()) {
                 Log.d(TAG, "Audio session start via gate: callId=$callId")
                 svc.startAudioSessionNow(callId)
-            } else {
-                Log.e(TAG, "Service ref null — session start nahi hua")
+            } else if (svc.isAudioRunning()) {
+                Log.d(TAG, "Audio session already running, mic permission re-asserted in foreground")
             }
+        } else {
+            Log.e(TAG, "Service ref null — session start nahi hua")
         }
+        pendingCallId = null
 
-        // 300ms baad khud band — kaam ho gaya, user ko kuch nahi dikhta
+        // 1.5s baad khud band — kaam ho gaya, user ko kuch nahi dikhta
         Handler(Looper.getMainLooper()).postDelayed({
             try {
                 finish()
@@ -113,6 +121,9 @@ class MicGateActivity : Activity() {
         try {
             val nm = getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
             nm?.cancel(CareCircleForegroundService.MIC_GATE_NOTIF_ID)
+        } catch (_: Exception) {}
+        try {
+            (serviceRef ?: CareCircleForegroundService.instanceRef)?.removeTemporaryOverlay()
         } catch (_: Exception) {}
     }
 }
