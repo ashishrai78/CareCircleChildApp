@@ -122,6 +122,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
     private var answerSent = false
     private val pendingCandidates = mutableListOf<IceCandidate>()
     private var callWakeLock: PowerManager.WakeLock? = null
+    private var audioFocusRequest: Any? = null
 
     // ⭐ FIX #1: silence tracking (audio thread se update hota hai)
     @Volatile
@@ -462,6 +463,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
                         )
                         .build()
                     audioManager.requestAudioFocus(focusRequest)
+                    audioFocusRequest = focusRequest
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Audio focus request error: ${e.message}")
@@ -805,6 +807,20 @@ class NativeWebRTCAudioSender(private val context: Context) {
                 Log.w(TAG, "Call WakeLock release error: ${e.message}")
             }
             callWakeLock = null
+
+            // 🔥 Abandon Audio Focus
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    (audioFocusRequest as? android.media.AudioFocusRequest)?.let { req ->
+                        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                        audioManager.abandonAudioFocusRequest(req)
+                        Log.d(TAG, "Audio focus abandoned")
+                    }
+                }
+                audioFocusRequest = null
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio focus abandon error: ${e.message}")
+            }
 
             // 🔥 Revert audio mode to NORMAL
             try {
