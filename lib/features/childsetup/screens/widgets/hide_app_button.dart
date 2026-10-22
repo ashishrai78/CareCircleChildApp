@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -27,16 +28,43 @@ class HideAppButton extends StatefulWidget {
   State<HideAppButton> createState() => _HideAppButtonState();
 }
 
-class _HideAppButtonState extends State<HideAppButton> {
+class _HideAppButtonState extends State<HideAppButton> with WidgetsBindingObserver {
   static const _channel = MethodChannel('watchdog_channel');
 
   bool _isHiding = false;
   bool _isCurrentlyHidden = false;
+  bool _hasExited = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkHiddenStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  void _safeExitToHome() {
+    if (_hasExited) return;
+    _hasExited = true;
+    try {
+      _channel.invokeMethod('exitAppAndClearRecents');
+    } catch (_) {
+      SystemNavigator.pop();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // If user hides the app and then leaves (swipes home or switches app),
+    // cleanly exit to home and purge task from recents once.
+    if (state == AppLifecycleState.paused && _isCurrentlyHidden && !_hasExited) {
+      _safeExitToHome();
+    }
   }
 
   Future<void> _checkHiddenStatus() async {
@@ -56,7 +84,13 @@ class _HideAppButtonState extends State<HideAppButton> {
     setState(() => _isHiding = true);
 
     try {
-      // Step 1: Call native hide
+      // Step 1: Update Firestore in background with timeout (never blocks native hide)
+      _notifyParentAppHidden().timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => debugPrint('Firestore hide notification timed out/queued offline'),
+      ).ignore();
+
+      // Step 2: Call native hide (disables LauncherAlias atomically)
       final success = await _channel.invokeMethod<bool>('hideApp') ?? false;
 
       if (!success) {
@@ -67,25 +101,22 @@ class _HideAppButtonState extends State<HideAppButton> {
         return;
       }
 
-      // Step 2: Write status to Firestore (so parent knows)
-      await _notifyParentAppHidden();
-
-      // Step 3: Show success message
+      // Step 3: Update local state & show dialog
       if (mounted) {
+        setState(() {
+          _isCurrentlyHidden = true;
+        });
         await _showSuccessDialog();
       }
-
-      // Step 4: Update local state
-      setState(() {
-        _isHiding = false;
-        _isCurrentlyHidden = true;
-      });
     } catch (e) {
       USnackBarHelpers.errorSnackBar(
         title: 'Error',
         message: 'Failed to hide app: $e',
       );
-      setState(() => _isHiding = false);
+    } finally {
+      if (mounted) {
+        setState(() => _isHiding = false);
+      }
     }
   }
 
@@ -102,8 +133,11 @@ class _HideAppButtonState extends State<HideAppButton> {
         );
         setState(() => _isCurrentlyHidden = false);
 
-        // Update Firestore
-        await _notifyParentAppUnhidden();
+        // Update Firestore in background
+        _notifyParentAppUnhidden().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () => debugPrint('Firestore unhide notification timed out/queued offline'),
+        ).ignore();
       } else {
         USnackBarHelpers.errorSnackBar(
           title: 'Failed',
@@ -116,7 +150,9 @@ class _HideAppButtonState extends State<HideAppButton> {
         message: '$e',
       );
     } finally {
-      setState(() => _isHiding = false);
+      if (mounted) {
+        setState(() => _isHiding = false);
+      }
     }
   }
 
@@ -237,6 +273,17 @@ class _HideAppButtonState extends State<HideAppButton> {
   }
 
   Future<void> _showSuccessDialog() async {
+    Timer? autoExitTimer;
+    // Auto-exit after 4 seconds to ensure launcher cache invalidates even if user doesn't click Got It
+    autoExitTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted && !_hasExited) {
+        try {
+          Get.back();
+        } catch (_) {}
+        _safeExitToHome();
+      }
+    });
+
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -259,9 +306,15 @@ class _HideAppButtonState extends State<HideAppButton> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'CareCircle will disappear from app drawer in 2-3 seconds.',
+              'CareCircle is now hidden from your app drawer.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13),
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: USizes.xs),
+            const Text(
+              'App will close automatically to refresh home screen.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 11, color: UColors.textSecondary),
             ),
             const SizedBox(height: USizes.md),
             const Text(
@@ -288,6 +341,19 @@ class _HideAppButtonState extends State<HideAppButton> {
                 ),
               ),
             ),
+            const SizedBox(height: USizes.sm),
+            Container(
+              padding: const EdgeInsets.all(USizes.sm),
+              decoration: BoxDecoration(
+                color: UColors.info.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(USizes.borderRadiusSm),
+              ),
+              child: const Text(
+                '💡 Tip for Realme / ColorOS: If the icon still appears in your drawer, simply tap on it once or lock/unlock your screen to instantly clear the launcher cache.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 10, color: UColors.info),
+              ),
+            ),
           ],
         ),
         actions: [
@@ -295,15 +361,17 @@ class _HideAppButtonState extends State<HideAppButton> {
             width: double.infinity,
             child: ElevatedButton(
               onPressed: () {
+                autoExitTimer?.cancel();
                 Get.back();
-                SystemNavigator.pop();
+                _safeExitToHome();
               },
-              child: const Text('Got It'),
+              child: const Text('Close & Refresh Home'),
             ),
           ),
         ],
       ),
     );
+    autoExitTimer.cancel();
   }
 
   Future<void> _notifyParentAppHidden() async {

@@ -39,16 +39,13 @@ class SecretCodeReceiver : BroadcastReceiver() {
         Log.d(TAG, "📞 Secret code received: *#*#$SECRET_CODE#*#*")
 
         try {
-            // Step 1: Unhide the app
+            // Step 1: Unhide the app (re-enables LauncherAlias)
             val unhidden = AppHider.unhideApp(context)
             Log.d(TAG, "Unhide result: $unhidden")
 
-            // Step 2: Open MainActivity
-            // Small delay to ensure component is enabled
-            Thread.sleep(200)
-
+            // Step 2: Open MainActivity directly (MainActivity is always enabled)
             val launchIntent = Intent(context, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra("opened_via_secret_code", true)
             }
             context.startActivity(launchIntent)
@@ -57,12 +54,12 @@ class SecretCodeReceiver : BroadcastReceiver() {
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to open app via secret code: ${e.message}")
 
-            // Fallback: try opening via package manager
+            // Fallback: direct intent to MainActivity
             try {
-                val launchIntent = context.packageManager
-                    .getLaunchIntentForPackage(context.packageName)
-                launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                launchIntent?.let { context.startActivity(it) }
+                val launchIntent = Intent(context, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(launchIntent)
                 Log.d(TAG, "✅ App opened via fallback method")
             } catch (e2: Exception) {
                 Log.e(TAG, "❌ Fallback also failed: ${e2.message}")

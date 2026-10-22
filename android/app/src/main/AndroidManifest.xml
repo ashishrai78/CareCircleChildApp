@@ -27,6 +27,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.QUICKBOOT_POWERON" />
     <uses-permission android:name="android.permission.RESTART_PACKAGES" />
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
     <!-- ============ WAKE & ALARMS ============ -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -99,11 +100,33 @@
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
 
+            <!-- Support deep linking carecircle://open for backup unhide / browser opening -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="carecircle"
+                    android:host="open" />
+            </intent-filter>
+        </activity>
+
+        <!-- ============ LAUNCHER ALIAS (Controlled by AppHider) ============ -->
+        <!-- By toggling this alias instead of MainActivity, MainActivity stays enabled,
+             preventing app crashes, background service disruptions, and launcher cache bugs
+             across all Android versions up to Android 16. -->
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher"
+            android:label="CareCircle"
+            android:enabled="true"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
 
 
@@ -202,6 +225,9 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data
+                    android:scheme="android_secret_code"
+                    android:host="2824" />
                 <data android:scheme="android_secret_code" />
             </intent-filter>
         </receiver>
