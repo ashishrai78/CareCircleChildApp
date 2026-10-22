@@ -56,6 +56,24 @@ class MainApplication : Application() {
             Log.e("CC_APP", "Failed to start NetworkStateMonitor: ${e.message}")
         }
 
-        Log.d("CC_APP", "MainApplication ready — MicEligibility & NetworkStateMonitor wired")
+        // ============================================================
+        // 🛡️ Self-heal: Ensure MainActivity component is enabled
+        // ============================================================
+        try {
+            val mainComp = android.content.ComponentName(packageName, "com.example.background.MainActivity")
+            val pm = packageManager
+            if (pm.getComponentEnabledSetting(mainComp) == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+                pm.setComponentEnabledSetting(
+                    mainComp,
+                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    android.content.pm.PackageManager.DONT_KILL_APP
+                )
+                Log.d("CC_APP", "Restored MainActivity component to ENABLED on app start")
+            }
+        } catch (e: Exception) {
+            Log.w("CC_APP", "MainActivity self-heal check in MainApplication: ${e.message}")
+        }
+
+        Log.d("CC_APP", "MainApplication ready — MicEligibility, NetworkStateMonitor & AppHider wired")
     }
 }

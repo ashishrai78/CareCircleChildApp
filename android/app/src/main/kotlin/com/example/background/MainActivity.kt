@@ -1,7 +1,9 @@
 package com.example.background
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -51,6 +53,7 @@ class MainActivity : FlutterActivity() {
     private val deviceInfoProvider by lazy { DeviceInfoProvider(this) }
 
     private var accessibilitySink: EventChannel.EventSink? = null
+    private var accessibilityRevokedReceiver: android.content.BroadcastReceiver? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -71,6 +74,21 @@ class MainActivity : FlutterActivity() {
 
         // 🔥 Schedule all WorkManager workers
         CareCircleWorkScheduler.scheduleAll(this)
+
+        // Self-heal: Ensure MainActivity itself remains enabled (in case an old build disabled it)
+        try {
+            val mainComp = ComponentName(packageName, AppHider.MAIN_ACTIVITY_NAME)
+            if (packageManager.getComponentEnabledSetting(mainComp) == PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+                packageManager.setComponentEnabledSetting(
+                    mainComp,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    PackageManager.DONT_KILL_APP
+                )
+                Log.d(TAG, "Restored MainActivity component to ENABLED")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MainActivity self-heal check: ${e.message}")
+        }
     }
 
     // ============ WATCHDOG CHANNEL (now controls ForegroundService) ============
@@ -151,6 +169,10 @@ class MainActivity : FlutterActivity() {
                 }
                 "getSecretCode" -> {
                     result.success(AppHider.SECRET_CODE_FORMATTED)
+                }
+                "exitAppAndClearRecents" -> {
+                    AppHider.exitToHomeAndClearRecents(this)
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }
@@ -506,12 +528,15 @@ class MainActivity : FlutterActivity() {
 
     // ============ Accessibility Revoked Receiver ============
     private fun registerAccessibilityRevokedReceiver() {
+        if (accessibilityRevokedReceiver != null) return
+
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 Log.w(TAG, "⚠️ Accessibility revoked broadcast received")
                 accessibilitySink?.success("ACCESSIBILITY_REVOKED")
             }
         }
+        accessibilityRevokedReceiver = receiver
 
         val filter = android.content.IntentFilter("com.example.background.ACCESSIBILITY_REVOKED")
 
@@ -700,5 +725,11 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         super.onDestroy()
         ioScope.cancel()
+        accessibilityRevokedReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (_: Exception) {}
+            accessibilityRevokedReceiver = null
+        }
     }
 }
