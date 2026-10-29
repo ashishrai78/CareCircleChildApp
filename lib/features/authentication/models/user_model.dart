@@ -6,11 +6,12 @@ class AppUserModel {
   String name;
   final String role; // parent | child
   bool? emailVerified;
-  final bool isPaired;
+  bool isPaired;
   String childCode;
   String parentUid;
   List<String> linkedChildren;
   Timestamp? createdAt;
+  Timestamp? lastParentSync;
 
   AppUserModel({
     required this.uid,
@@ -20,6 +21,7 @@ class AppUserModel {
     this.emailVerified,
     this.isPaired = false,
     this.createdAt,
+    this.lastParentSync,
     required this.childCode,
     this.parentUid = '',
     List<String>? linkedChildren,
@@ -49,6 +51,7 @@ class AppUserModel {
       'parentUid': parentUid,
       'linkedChildren': linkedChildren,
       'createdAt': createdAt,
+      'lastParentSync': lastParentSync,
     };
   }
 
@@ -67,6 +70,7 @@ class AppUserModel {
       isPaired: data['isPaired'] ?? false,
       childCode: data['childCode'] ?? '',
       parentUid: data['parentUid'] ?? '',
+      lastParentSync: data['lastParentSync'] as Timestamp?,
       linkedChildren: List<String>.from(data['linkedChildren'] ?? []),
       createdAt: data['createdAt'] ?? Timestamp.now(),
     );

@@ -1,4 +1,5 @@
 import 'package:background/features/childsetup/screens/permission_setup_screen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -91,8 +92,26 @@ class AuthenticationRepository extends GetxController {
       // Verified → go to PermissionSetupScreen
       try {
         await UserRepository.instance.generateChildCode(user.uid);
+
+        // 🛡️ Auto-unpair check: If paired but no parent sync for 7+ days, reset isPaired
+        final doc = await FirebaseFirestore.instance.collection('Users').doc(user.uid).get();
+        if (doc.exists && doc.data() != null) {
+          final data = doc.data()!;
+          final bool isPaired = data['isPaired'] ?? false;
+          final Timestamp? lastSync = data['lastParentSync'] as Timestamp?;
+          if (isPaired && lastSync != null) {
+            final days = DateTime.now().difference(lastSync.toDate()).inDays;
+            if (days >= 7) {
+              await FirebaseFirestore.instance.collection('Users').doc(user.uid).update({
+                'isPaired': false,
+                'parentUid': '',
+              });
+              debugPrint("⚠️ Child device automatically unlinked due to 7 days parent inactivity");
+            }
+          }
+        }
       } catch (e) {
-        debugPrint("generateChildCode failed: $e");
+        debugPrint("generateChildCode or inactivity check failed: $e");
       }
       Get.offAll(() => PermissionSetupScreen());
     } else {
