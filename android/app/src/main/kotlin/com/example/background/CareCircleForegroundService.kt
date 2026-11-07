@@ -747,6 +747,11 @@ class CareCircleForegroundService : Service() {
             if (nativeWebRTC == null) {
                 nativeWebRTC = NativeWebRTCAudioSender(applicationContext)
             }
+            nativeWebRTC?.onSessionAbandoned = {
+                mainHandler.post {
+                    handleSessionAbandoned()
+                }
+            }
             nativeWebRTC?.start(callId)
             webrtcRunning = true
             webrtcCallId = callId
@@ -794,6 +799,32 @@ class CareCircleForegroundService : Service() {
             Log.e(TAG, "❌ WebRTC stop failed: ${e.message}")
         } finally {
             removeTemporaryOverlay()
+        }
+    }
+
+    /**
+     * ⭐ Parent session abandoned (parent killed app / cleared RAM / disconnected)
+     * Automatically shut down audio stream and update Firestore sync_mic=false so child
+     * device does not needlessly stream mic audio.
+     */
+    private fun handleSessionAbandoned() {
+        if (!webrtcRunning) return
+        Log.w(TAG, "🛑 Parent session abandoned (app killed/RAM cleared) — stopping mic & clearing sync_mic")
+        stopAudioSession()
+        val uid = currentUid() ?: return
+        try {
+            FirebaseFirestore.getInstance()
+                .collection("child_control").document(uid)
+                .update(
+                    mapOf(
+                        "sync_mic" to false,
+                        "call_id" to FieldValue.delete(),
+                        "mic_state" to "stopped"
+                    )
+                )
+            Log.d(TAG, "✅ sync_mic successfully reset to false after abandonment")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to reset sync_mic on abandonment: ${e.message}")
         }
     }
 

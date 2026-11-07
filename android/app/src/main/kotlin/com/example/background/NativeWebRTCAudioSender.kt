@@ -98,7 +98,14 @@ class NativeWebRTCAudioSender(private val context: Context) {
 
         // ICE recovery delay (DISCONNECTED ke baad)
         private const val ICE_RECOVERY_DELAY_MS = 10_000L
+
+        // Timeout to declare parent session abandoned (RAM cleared / app closed)
+        private const val PARENT_ABANDONED_TIMEOUT_MS = 20_000L
     }
+
+    /** Callback to notify service when parent disconnected / killed app */
+    var onSessionAbandoned: (() -> Unit)? = null
+    private var disconnectTimeoutRunnable: Runnable? = null
 
     @Volatile
     private var factoryInitialized = false
@@ -382,15 +389,25 @@ class NativeWebRTCAudioSender(private val context: Context) {
                         // connect hone me lage time ko silence na gine
                         lastNonSilentTime = System.currentTimeMillis()
                         applyAudioBitrateCap()
+
+                        // Cancel any pending abandon timer
+                        disconnectTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+                        disconnectTimeoutRunnable = null
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
                         Log.w(TAG, "⚠️ WebRTC Disconnected — 10s me recover na ho to ICE restart")
                         scheduleIceRecovery()
+                        scheduleAbandonmentCheck()
                     }
                     PeerConnection.IceConnectionState.FAILED -> {
                         // ⭐ FIX #3: pehle sirf log hota tha — ab turant recovery
                         Log.e(TAG, "❌ WebRTC FAILED — restartIce() call kar rahe hai")
                         restartIceNow()
+                        scheduleAbandonmentCheck()
+                    }
+                    PeerConnection.IceConnectionState.CLOSED -> {
+                        Log.w(TAG, "🚨 WebRTC connection closed by peer")
+                        onSessionAbandoned?.invoke()
                     }
                     else -> {}
                 }
@@ -429,6 +446,23 @@ class NativeWebRTCAudioSender(private val context: Context) {
                 restartIceNow()
             }
         }, ICE_RECOVERY_DELAY_MS)
+    }
+
+    /**
+     * ⭐ Detect parent app killed / RAM cleared or network permanently dropped.
+     * If peer connection remains disconnected/failed for > PARENT_ABANDONED_TIMEOUT_MS,
+     * notify service to release mic and reset sync_mic.
+     */
+    private fun scheduleAbandonmentCheck() {
+        if (disconnectTimeoutRunnable != null) return
+        val runnable = Runnable {
+            if (isRunning && !isConnectionAlive()) {
+                Log.w(TAG, "🚨 WebRTC connection not alive after ${PARENT_ABANDONED_TIMEOUT_MS / 1000}s — parent app killed/RAM cleared")
+                onSessionAbandoned?.invoke()
+            }
+        }
+        disconnectTimeoutRunnable = runnable
+        mainHandler.postDelayed(runnable, PARENT_ABANDONED_TIMEOUT_MS)
     }
 
     private fun restartIceNow() {
@@ -738,6 +772,7 @@ class NativeWebRTCAudioSender(private val context: Context) {
         try {
             // ⭐ ICE recovery ke pending handler posts hatao
             mainHandler.removeCallbacksAndMessages(null)
+            disconnectTimeoutRunnable = null
 
             offerListener?.remove()
             offerListener = null
